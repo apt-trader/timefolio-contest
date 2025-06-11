@@ -7,3 +7,5 @@ __pycache__/
 # data folders
 cache/
 out/
+krx_data.db
+logs/
