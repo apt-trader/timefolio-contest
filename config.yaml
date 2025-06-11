@@ -1,0 +1,51 @@
+# Data source files and folders
+data_settings:
+  stock_universe_file: "validated_universes/sector_universe_validated_20250522_134552.csv"
+  market_sectors_file: "market_sectors.csv"
+  start_date: '2023-01-01'  # Extended to ensure sufficient historical data
+  end_date: '2025-05-23'
+  cache_dir: 'cache'
+  output_dir: 'out'
+
+# Core optimization parameters
+optimization:
+  sharpe_treynor_weight: 0.5      # 0 = pure Sharpe, 1 = pure Treynor
+  cvar_alpha: 0.05                # CVaR confidence level
+  return_weight: 2.5              # Aggressiveness on returns
+  cash_fraction: 0.04             # Cash reserve
+  backtest_split_date: '2025-05-23'
+  min_turnover: 0.05              # Weekly turnover floor (half-sum definition)
+  individual_limit: 0.15          # Max 15% per stock
+  sector_limit_multiplier: 2.0    # 2× market weight cap
+  sector_limit_absolute: 0.10     # 10% absolute cap if lower
+  max_positions: 12               # Ensure this is set correctly
+  train_window_days: 252          # ~1 year of trading days
+  rebalance_step_days: 5          # Weekly rebalancing (5 trading days)
+  risk_free_rate: 0.0441          # 10Y 국채 4.41%
+  optimization_timeout: 300       # Increase from 60 to 300 seconds
+  max_retries: 5                  # Increase from 3 to 5
+
+# Risk-management options
+risk_management:
+  monte_carlo_iterations: 1000    # Number of MC simulations
+  entropic_risk: false            # Enable entropic risk measure
+
+# Beta regime tracking
+beta_regime:
+  smoothing_alpha: 0.2            # Exponential smoothing factor
+  max_jump: 0.3                   # Max allowed jump in beta
+
+# Data-fetch and retries
+data_fetch:
+  max_attempts: 3
+  retry_delay: 5                  # Seconds between retries
+
+# Logging
+logging:
+  level: INFO
+  
+# Debug settings
+debug:
+  log_optimization: true
+  save_intermediate: true
+  log_level: DEBUG

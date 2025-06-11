@@ -1,0 +1,9 @@
+# venv and caches
+venv/
+__pycache__/
+*.py[cod]
+# VS Code
+.vscode/
+# data folders
+cache/
+out/

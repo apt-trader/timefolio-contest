@@ -1,0 +1,74 @@
+# Market Sectors Data Format
+# Column 1: SECTOR_CODE - Standard sector code (En, Ma, In, CD, CS, He, Fi, IT, Co, Ut, Re)
+# Column 2: MARKET_WEIGHT - Current market weight percentage
+# The optimizer will automatically calculate a limit as max(2x market_weight, 10%)
+
+[250404]
+# SECTOR_CODE   MARKET_WEIGHT
+En              1.46
+Ma              6.81
+In              22.47
+CD              8.73
+CS              3.59
+He              11.6
+Fi              9.99
+IT              27.84
+Co              6.53
+Ut              0.9
+Re              0.07
+
+[250411]
+# SECTOR_CODE   MARKET_WEIGHT
+En              1.44
+Ma              6.79
+In              23.01
+CD              8.57
+CS              3.59
+He              11.42
+Fi              9.83
+IT              28.0
+Co              6.34
+Ut              0.94
+Re              0.07
+
+[250418]
+# SECTOR_CODE   MARKET_WEIGHT
+En              1.36
+Ma              6.68
+In              23.65
+CD              8.43
+CS              3.7
+He              11.72
+Fi              9.87
+IT              27.22
+Co              6.34
+Ut              0.97
+Re              0.07
+
+[250425]
+# SECTOR_CODE   MARKET_WEIGHT
+En              1.37
+Ma              6.81
+In              23.9
+CD              8.49
+CS              3.63
+He              11.29
+Fi              10.05
+IT              27.08
+Co              6.32
+Ut              1.0
+Re              0.07
+
+[250516]
+# SECTOR_CODE   MARKET_WEIGHT
+En              1.29
+Ma              6.4
+In              24.07
+CD              8.47
+CS              3.68
+He              11.1
+Fi              10.46
+IT              27.16
+Co              6.21
+Ut              1.09
+Re              0.06
