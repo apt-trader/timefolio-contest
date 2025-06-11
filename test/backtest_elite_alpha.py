@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from competition_portfolio import main as run_optimization
 from elite_alpha_stack import EliteAlphaSignalStack
-from cvar_optimizer_revamped import Config, DataManager, CVaROptimizer
+from portfolio_optimizer import Config, DataManager, CVaROptimizer
 import logging
 
 # Set up logging

@@ -2,16 +2,13 @@
 data_settings:
   stock_universe_file: "validated_universes/sector_universe_validated_20250522_134552.csv"
   market_sectors_file: "market_sectors.csv"
-  start_date: '2023-01-01'  # Extended to ensure sufficient historical data
-  end_date: '2025-05-23'
+  start_date: '2022-01-01'  # Extended to ensure sufficient historical data
+  end_date: '2025-09-30'
   cache_dir: 'cache'
   output_dir: 'out'
 
 # Core optimization parameters
 optimization:
-  sharpe_treynor_weight: 0.5      # 0 = pure Sharpe, 1 = pure Treynor
-  cvar_alpha: 0.05                # CVaR confidence level
-  return_weight: 2.5              # Aggressiveness on returns
   cash_fraction: 0.04             # Cash reserve
   backtest_split_date: '2025-05-23'
   min_turnover: 0.05              # Weekly turnover floor (half-sum definition)
@@ -19,16 +16,27 @@ optimization:
   sector_limit_multiplier: 2.0    # 2× market weight cap
   sector_limit_absolute: 0.10     # 10% absolute cap if lower
   max_positions: 12               # Ensure this is set correctly
-  train_window_days: 252          # ~1 year of trading days
   rebalance_step_days: 5          # Weekly rebalancing (5 trading days)
   risk_free_rate: 0.0441          # 10Y 국채 4.41%
   optimization_timeout: 300       # Increase from 60 to 300 seconds
   max_retries: 5                  # Increase from 3 to 5
+  lambda_hhi: 10.0                 # Penalty weight for HHI > threshold
+  hhi_weight_threshold: 0.08       # Maximum acceptable weight HHI
+  lambda_return_hhi: 10.0          # Penalty weight for Return-HHI > threshold
+  return_hhi_threshold: 0.30       # Maximum acceptable P&L concentration
+  ml_train_window_days: 252       # 1-year look-back for ML forecaster
+  risk_train_window_days: 504     # 2-year look-back for PCA-based risk model
+  ewma_decay_cov: 0.97            # EWMA decay for covariance (half-life ≈ 23d)
+  ewma_decay_mean: 0.99           # EWMA decay for mean returns
+  validation_window: '6M'         # 6-month walk-forward folds
+  n_splits: 4                     # Number of CV folds
 
 # Risk-management options
 risk_management:
   monte_carlo_iterations: 1000    # Number of MC simulations
-  entropic_risk: false            # Enable entropic risk measure
+  stress_test_dates:
+    - '2022-03-10'               # Example inflation shock dates
+    - '2022-09-15'
 
 # Beta regime tracking
 beta_regime:

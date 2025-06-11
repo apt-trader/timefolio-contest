@@ -20,7 +20,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Import after setting up path
-from cvar_optimizer_revamped import Config, DataManager, CVaROptimizer
+from portfolio_optimizer import Config, DataManager, CVaROptimizer
 
 def run_minimal_optimization():
     try:

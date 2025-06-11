@@ -21,7 +21,8 @@ from skopt.plots import plot_convergence, plot_objective
 import matplotlib.pyplot as plt
 
 # Local imports
-from cvar_optimizer_revamped import Config, DataManager, CVaROptimizer
+from portfolio_optimizer import Config, DataManager, PortfolioOptimizer
+from portfolio_metrics import calculate_pcr_sharpe, calculate_diversification_metrics
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -82,9 +83,9 @@ class BayesianTuner:
         
         # Define search space
         self.space = [
-            Real(0.5, 5.0, name='return_weight', prior='log-uniform'),  # λ
-            Real(0.01, 0.10, name='cvar_alpha', prior='log-uniform'),   # α
-            Real(0.0, 2.0, name='dispersion_penalty', prior='uniform')  # γ
+            Real(0.1, 50.0, name='lambda_hhi', prior='log-uniform'),
+            Real(0.1, 50.0, name='lambda_return_hhi', prior='log-uniform'),
+            Real(0.80, 0.995, name='explained_variance', prior='uniform'),
         ]
         
     def _get_train_test_data(self, end_date: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -215,123 +216,47 @@ class BayesianTuner:
         logger.info(f"Dynamic n_calls: {calls} (avg time per call: {avg_time_per_call:.2f}s, remaining time: {remaining_time:.1f}min)")
         return calls
     
-    def _evaluate_portfolio(self, 
-                          params: Dict[str, float], 
-                          train_returns: pd.DataFrame,
-                          test_returns: pd.DataFrame,
-                          mu: pd.Series,
-                          beta_vec: pd.Series) -> Dict[str, float]:
+    def _evaluate_portfolio(self, train_returns: pd.DataFrame, test_returns: pd.DataFrame, expected_returns: pd.Series = None):
         """
         Evaluate portfolio performance for given parameters.
-        
         Args:
-            params: Parameters to evaluate (return_weight, cvar_alpha, dispersion_penalty)
             train_returns: Training returns DataFrame
             test_returns: Testing returns DataFrame
-            mu: Expected returns vector
-            beta_vec: Beta vector for stocks
-            
+            expected_returns: Expected returns vector
         Returns:
-            Metrics dictionary (sharpe, cvar, mdd, etc.)
+            Negative score (for minimization)
         """
-        # Update config with parameters
-        temp_config = Config(self.config.__dict__.get('path', 'config.yaml'))
-        temp_config.return_weight = params['return_weight']
-        temp_config.cvar_alpha = params['cvar_alpha']
+        # Use PortfolioOptimizer
+        optimizer = PortfolioOptimizer(config=self.config, risk_free_rate=None)
+        if expected_returns is None:
+            expected_returns = train_returns.mean() * 252
+        weights = optimizer.optimize(train_returns, expected_returns, n_positions=self.config.optimization.max_positions)
+        # Compute metrics
+        cov = train_returns.cov() * 252
+        risk_free_rate = 0.0  # or self.config.risk_free_rate if available
+        pcr_sharpe = calculate_pcr_sharpe(train_returns, risk_free_rate)
+        div_metrics = calculate_diversification_metrics(weights.values, cov, train_returns)
+        score = pcr_sharpe @ weights - \
+            self.config.optimization.lambda_hhi * max(0, div_metrics['hhi_weight'] - self.config.optimization.hhi_weight_threshold) \
+            - self.config.optimization.lambda_return_hhi * max(0, div_metrics['hhi_return'] - self.config.optimization.return_hhi_threshold)
+        return -float(score)
         
-        # Create optimizer with parameters
-        optimizer = CVaROptimizer(temp_config, self.data_manager, beta_vec)
-        
-        # Add dispersion penalty if needed
-        dispersion_gamma = params.get('dispersion_penalty', 0.0)
-        
-        # Run optimization (modified to include dispersion penalty)
-        if dispersion_gamma > 0:
-            # Calculate contribution targets (equal risk contribution)
-            cov = train_returns.cov() * 252
-            vol = np.sqrt(np.diag(cov))
-            contrib_target = vol / vol.sum()
-            
-            # Pass dispersion penalty to optimizer
-            weights = optimizer.optimise(
-                train_returns, 
-                mu, 
-                dispersion_gamma=dispersion_gamma,
-                contrib_target=contrib_target
-            )
-        else:
-            weights = optimizer.optimise(train_returns, mu)
-        
-        # Calculate performance metrics on test set
-        test_returns_aligned = test_returns[weights.index]
-        portfolio_returns = (weights * test_returns_aligned).sum(axis=1)
-        
-        # Calculate metrics
-        annual_factor = 252 / len(portfolio_returns)
-        annual_return = portfolio_returns.mean() * 252
-        annual_vol = portfolio_returns.std() * np.sqrt(252)
-        sharpe = annual_return / annual_vol if annual_vol > 0 else 0
-        
-        # Calculate maximum drawdown
-        cumulative = (1 + portfolio_returns).cumprod()
-        drawdown = 1 - cumulative / cumulative.cummax()
-        max_drawdown = drawdown.max()
-        
-        # Calculate CVaR
-        returns_sorted = portfolio_returns.sort_values()
-        cvar_cutoff = int(len(returns_sorted) * temp_config.cvar_alpha)
-        cvar = returns_sorted.iloc[:cvar_cutoff].mean() if cvar_cutoff > 0 else returns_sorted.min()
-        
-        return {
-            'sharpe': sharpe,
-            'cvar': cvar,
-            'mdd': max_drawdown,
-            'annual_return': annual_return,
-            'annual_vol': annual_vol,
-            'weights': weights
-        }
-        
-    def objective_function(self, params: List[float], 
-                          train_returns: pd.DataFrame,
-                          test_returns: pd.DataFrame,
-                          mu: pd.Series,
-                          beta_vec: pd.Series) -> float:
+    def objective_function(self, params: List[float], train_returns: pd.DataFrame, test_returns: pd.DataFrame, expected_returns: pd.Series = None):
         """
         Objective function for Bayesian optimization.
-        Optimizes a weighted combination of Sharpe ratio and negative CVaR.
-        
         Args:
-            params: [return_weight, cvar_alpha, dispersion_penalty]
+            params: [lambda_hhi, lambda_return_hhi, explained_variance]
             train_returns: Training returns DataFrame
             test_returns: Testing returns DataFrame
-            mu: Expected returns vector
-            beta_vec: Beta vector for stocks
-            
+            expected_returns: Expected returns vector
         Returns:
             Negative of the objective value (for minimization)
         """
-        param_dict = {
-            'return_weight': params[0],
-            'cvar_alpha': params[1],
-            'dispersion_penalty': params[2]
-        }
-        
+        self.config.optimization.lambda_hhi = params[0]
+        self.config.optimization.lambda_return_hhi = params[1]
+        self.config.optimization.explained_variance = params[2]
         try:
-            metrics = self._evaluate_portfolio(
-                param_dict, 
-                train_returns, 
-                test_returns, 
-                mu, 
-                beta_vec
-            )
-            
-            # Objective: maximize Sharpe while minimizing CVaR and MDD
-            # Since gp_minimize minimizes, we negate the score
-            # Weight the objectives: 60% Sharpe, 30% CVaR, 10% MDD
-            score = 0.6 * metrics['sharpe'] - 0.3 * abs(metrics['cvar']) - 0.1 * metrics['mdd']
-            
-            return -score  # Negate for minimization
-            
+            return self._evaluate_portfolio(train_returns, test_returns, expected_returns)
         except Exception as e:
             logger.error(f"Error in objective function: {e}")
             return 1000  # Large penalty for failures
@@ -724,49 +649,34 @@ class BayesianTuner:
         plt.savefig(output_path)
         plt.close()
         
-    def tune_hyperparams(self, 
+    def tune_hyperparams(self,
                         end_date: Optional[str] = None,
                         expected_returns: Optional[pd.Series] = None,
-                        beta_vec: Optional[pd.Series] = None,
                         max_time_minutes: Optional[int] = None,
                         n_calls: Optional[int] = None) -> Dict[str, float]:
         """
         Tune hyperparameters using Bayesian optimization.
-        
         Args:
             end_date: End date for optimization period (defaults to today)
             expected_returns: Optional expected returns override
-            beta_vec: Optional beta vector override
-            
         Returns:
             Dictionary of optimized parameters
         """
         # Set default end date to today if not provided
         if end_date is None:
             end_date = datetime.now().strftime("%Y-%m-%d")
-            
         # Get train/test data
         train_returns, test_returns = self._get_train_test_data(end_date)
-        
         # Set default expected returns if not provided
         if expected_returns is None:
             expected_returns = train_returns.mean() * 252
-            
-        # Set default beta vector if not provided
-        if beta_vec is None:
-            beta_vec = pd.Series(1.0, index=train_returns.columns)
-            
         # Create the objective function with fixed data
         @use_named_args(self.space)
-        def objective(**params):
-            return self.objective_function(
-                [params['return_weight'], params['cvar_alpha'], params['dispersion_penalty']],
-                train_returns,
-                test_returns,
-                expected_returns,
-                beta_vec
-            )
-            
+        def objective(lambda_hhi, lambda_return_hhi, explained_variance):
+            self.config.optimization.lambda_hhi = lambda_hhi
+            self.config.optimization.lambda_return_hhi = lambda_return_hhi
+            self.config.optimization.explained_variance = explained_variance
+            return self._evaluate_portfolio(train_returns, test_returns, expected_returns)
         # Run Bayesian optimization
         logger.info(f"Starting Bayesian optimization with {self.n_calls} calls")
         result = gp_minimize(
@@ -776,32 +686,27 @@ class BayesianTuner:
             random_state=self.random_state,
             verbose=True
         )
-        
         # Extract best parameters
         best_params = {
-            'return_weight': result.x[0],
-            'cvar_alpha': result.x[1],
-            'dispersion_penalty': result.x[2]
+            'lambda_hhi': result.x[0],
+            'lambda_return_hhi': result.x[1],
+            'explained_variance': result.x[2]
         }
-        
         # Save results
         timestamp = datetime.now().strftime("%Y%m%d")
         result_path = self.output_dir / f"tuning_result_{timestamp}.pkl"
         with open(result_path, 'wb') as f:
             pickle.dump(result, f)
-            
         # Create visualization
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
         plot_convergence(result, ax=ax1)
-        plot_objective(result, dimensions=['return_weight', 'cvar_alpha'], ax=ax2)
+        plot_objective(result, dimensions=['lambda_hhi', 'lambda_return_hhi'], ax=ax2)
         plt.tight_layout()
         plt.savefig(self.output_dir / f"tuning_plots_{timestamp}.png")
-        
         # Log results
         logger.info(f"Optimization complete. Best parameters: {best_params}")
         logger.info(f"Best score: {-result.fun:.4f}")
         logger.info(f"Results saved to {result_path}")
-        
         return best_params
     
     def get_latest_params(self) -> Dict[str, float]:

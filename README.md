@@ -50,68 +50,44 @@ A production-grade system for building and stress-testing Korean equity portfoli
 > **Note**: For the July 2025 contest, ensure all pre-contest checks are completed before the competition starts.
 
 ### 1-2 Weeks Before Contest
-- [ ] Verify all API credentials are valid (KIS, etc.)
 - [ ] Update universe files with latest stock listings
 - [ ] Clear `forbidden.csv` to reset liquidity restrictions
 - [ ] Run full backtest with recent market data
 - [ ] Verify sector weight limits and position constraints
 
 ### 1-2 Days Before Start
-- [ ] Run `batch_update.py` with `--start-date` to refresh all data
+- [ ] Run `backfill_krx_data.py --start-date 20220701 --end-date 20250711`
+- [ ] Verify data integrity in SQLite database
 - [ ] Execute dry-run with `--dry-run` flag
-- [ ] Verify output directory has proper write permissions
-- [ ] Confirm backup system is working
+- [ ] Run `competition_portfolio.py --config config.yaml --ml forecast --positions 15 --output-dir output`
 
 ### Contest Day
-- [ ] Run optimization with `--use-ml-forecast` if enabled
 - [ ] Review generated portfolio in `output/` directory
 - [ ] Check risk metrics and compliance reports
 - [ ] Manually verify top positions against latest news
 
-## KRX Data Fetcher
-
-A robust module for fetching historical market data from the Korea Exchange (KRX) using their OTP-based download system. This module is designed to be resilient against rate limiting and provides a clean interface for both one-time backfills and incremental updates.
+## KRX Data FetcherM
 
 ### Key Features
-
-- Fetches daily OHLCV data for all KOSPI and KOSDAQ stocks
+- Fetches daily OHLCV data for all KOSPI and KOSDAQ stocks using their OTP-based download system
 - Handles rate limiting and automatic retries
 - Stores data in an efficient SQLite database
 - Supports incremental updates and backfilling
 - Includes comprehensive error handling and logging
 
-### Quick Start
-
-```python
-from krx_fetcher import KRXDataFetcher
-
-# Initialize with default settings
-fetcher = KRXDataFetcher()
-
-# Fetch data for a specific date
-results = fetcher.fetch_daily_data('20250530')
-
-# Get historical data for a stock
-df = fetcher.get_stock_data('005930', start_date='20220101', end_date='20221231')
-
-# Backfill historical data (see backfill_krx_data.py for full options)
-# python backfill_krx_data.py --start-date 20220101 --end-date 20250530
-```
-
 ### Backfilling Data
-
 To backfill historical data, use the provided script:
 
 ```bash
-# Backfill with default settings (2-5 second delay between requests)
-python backfill_krx_data.py --start-date 20220101 --end-date 20250530
+# Backfill with default settings (weekly update)
+python backfill_krx_data.py --start-date 20220701 --end-date 20250704
+python backfill_krx_data.py --start-date 20220707 --end-date 20250711
 
 # With custom delay settings
 python backfill_krx_data.py --min-delay 3 --max-delay 7
 ```
 
 ### Database Schema
-
 Data is stored in an SQLite database with the following schema:
 
 ```sql
@@ -130,13 +106,6 @@ CREATE TABLE daily_prices (
     PRIMARY KEY (code, date)
 )
 ```
-
-### Error Handling
-
-- Automatic retries for failed requests
-- Rate limiting to avoid IP bans
-- Detailed logging to `krx_fetcher.log`
-- Graceful handling of weekends and holidays
 
 ## Setup Preparations
 
@@ -159,18 +128,7 @@ pip install -r requirements-ml.txt
 python -c "import pandas as pd; print(f'Success! pandas version: {pd.__version__}')"
 ```
 
-### 3. Configure API Access
-```bash
-# Set KIS API credentials
-export KIS_APP_KEY='your_key_here'
-export KIS_APP_SECRET='your_secret_here'
-
-# Test authentication
-python kis_auth.py --status
-python kis_auth.py --refresh
-```
-
-### 4. Initial Data Setup
+### 3. Initial Data Setup
 ```bash
 # Create necessary directories
 mkdir -p data/processed validated_universes output
@@ -182,7 +140,7 @@ python batch_update.py --start-date $(date -v-1y +%Y%m%d)
 ls -lh data/processed/*.csv
 ```
 
-### 5. Configuration
+### 4. Configuration
 1. Create a symlink to the latest universe file:
    ```bash
    # Create a symlink that always points to the latest universe file
@@ -202,11 +160,16 @@ ls -lh data/processed/*.csv
      max_positions: 15
      position_limit: 0.15  # 15% per position
      sector_limit_multiplier: 2.0  # 2x market weight
+     min_turnover: 0.05
+     lambda_hhi: 10.0             # Penalty for weight HHI above threshold
+     hhi_weight_threshold: 0.08   # Max acceptable Herfindahl index for weights
+     lambda_return_hhi: 10.0      # Penalty for return-HHI above threshold
+     return_hhi_threshold: 0.30   # Max acceptable Herfindahl index for P&L contributions
    ```
 
 3. Update market_sector.csv with new weights
 
-### 6. Verify Setup
+### 5. Verify Setup
 ```bash
 # Dry run
 python competition_portfolio.py --config config.yaml --dry-run
@@ -215,7 +178,7 @@ python competition_portfolio.py --config config.yaml --dry-run
 tail -n 20 logs/optimization_*.log
 ```
 
-### 7. Regular Updates
+### 6. Regular Updates
 ```bash
 # Update market data (run weekly)
 python batch_update.py --start-date $(date -v-1w +%Y%m%d)
@@ -225,6 +188,17 @@ python -m ml_forecast.train
 
 # Generate new portfolio
 python competition_portfolio.py --config config.yaml --positions 15 --output-dir output
+```
+
+### 7. Configure API Access (optional)
+```bash
+# Set KIS API credentials
+export KIS_APP_KEY='your_key_here'
+export KIS_APP_SECRET='your_secret_here'
+
+# Test authentication
+python kis_auth.py --status
+python kis_auth.py --refresh
 ```
 
 ## Commands
@@ -289,13 +263,19 @@ python competition_portfolio.py --config config.yaml --positions 15 --use-ml-for
   - Ticker validation against market data
   - Sector and market cap validation
 
-### 3. Portfolio Optimizer (`competition_portfolio.py`)
-- **Main Orchestrator**
-  - Coordinates data loading, optimization, and risk management
-  - Handles command-line arguments and configuration
-  - Manages output generation and reporting
+### 3. Orchestration (`competition_portfolio.py`)
+- **Main entry point**
+  - Loads data, runs factor engine & forecaster
+  - Invokes `portfolio_optimizer.py` for weight computation
+  - Executes risk monitoring & exports results
 
-### 4. Portfolio Metrics (`portfolio_metrics.py`)
+### 4. Portfolio Optimizer (`portfolio_optimizer.py`)
+- **Core solver** maximizing PCR-Sharpe with HHI & Return-HHI penalties
+- Enforces position (≤15%), sector caps, and in-solver turnover (≥5%) constraints
+- Mixed-integer programming for exact position counts with convex fallback
+- Logs detailed metrics from `portfolio_metrics.py`
+
+### 5. Portfolio Metrics (`portfolio_metrics.py`)
 - **Optimization Framework**
   - Implements PCR-Sharpe ratio optimization
   - Uses Ledoit-Wolf shrinkage for covariance estimation
@@ -304,14 +284,14 @@ python competition_portfolio.py --config config.yaml --positions 15 --use-ml-for
   - Enforces 5% minimum weekly turnover
   - Supports mixed-integer programming for exact position counts
 
-### 4. ML Return Forecaster (`ml_forecast.py`)
+### 6. ML Return Forecaster (`ml_forecast.py`)
 - **XGBoost-based return prediction**
   - Implements gradient boosting for return forecasting
   - Feature importance analysis
   - Model versioning and persistence
   - Automated hyperparameter tuning
 
-### 5. Risk Monitoring System (`risk_monitor.py`)
+### 7. Risk Monitoring System (`risk_monitor.py`)
 - **Risk Metrics**
   - Tracks 6M and 12M rolling maximum drawdown
   - Monitors HHI concentration (weight and return)
@@ -324,14 +304,14 @@ python competition_portfolio.py --config config.yaml --positions 15 --use-ml-for
   - Slack integration for team notifications
   - Daily risk reports
 
-### 6. Backtesting Framework (`backtest.py`)
+### 8. Backtesting Framework (`backtest.py`)
 - **Walk-Forward Validation**
   - Implements rolling window backtesting
   - Supports daily and weekly rebalancing
   - Tracks key performance metrics
   - Generates detailed performance reports
 
-### 7. Factor Engine (`factor_engine.py`)
+### 9. Factor Engine (`factor_engine.py`)
 Implements a multi-factor model for alpha generation.
 
 **Key Features:**
@@ -345,7 +325,7 @@ Implements a multi-factor model for alpha generation.
   - Price deviation from moving averages
   - Short-term reversal signals
 
-### 8. Compliance Filters (`compliance_filters.py`)
+### 10. Compliance Filters (`compliance_filters.py`)
 - **Stock Screening**
   - 3 billion KRW minimum 5-day average volume
   - 90-day minimum trading history
@@ -373,20 +353,20 @@ Implements a multi-factor model for alpha generation.
 
 ### Portfolio Optimizer
 ```
-Objective:  max  PCR-Sharpe(w) - λ₁·HHI(w) - λ₂·ReturnHHI(w)
-
+Objective:  max  PCR-Sharpe(w)
+             - λ₁·max(0, HHI(w) - τ₁)
+             - λ₂·max(0, ReturnHHI(w) - τ₂)
 Where:
-- PCR-Sharpe: Principal Component Risk-adjusted Sharpe ratio
-- HHI: Herfindahl-Hirschman Index for concentration risk
-- ReturnHHI: Concentration of return contributions
-- λ₁, λ₂: Penalty weights for concentration metrics
-
+  - PCR-Sharpe: Principal Component Risk-adjusted Sharpe ratio
+  - HHI: Herfindahl-Hirschman Index for weight concentration
+  - ReturnHHI: Herfindahl-Hirschman Index for return contributions
+  - λ₁, λ₂: Penalty weights for concentration metrics (configured via lambda_hhi, lambda_return_hhi)
 Constraints:
   ∑w = 1
-  0 ≤ w_i ≤ 0.15   (individual position limit, 0.25 for Samsung Electronics)
-  sector_sum_s ≤ 2 × market_weight_s  (sector caps)
-  ||w − w_prev||₁ ≥ 0.05  (minimum 5% weekly turnover)
-  liquidity_i ≥ 3B KRW (5-day average)
+  0 ≤ w_i ≤ 0.15
+  sector_sum_s ≤ max(2 × market_weight_s, 0.10)
+  ||w − w_prev||₁ ≥ 0.05   # Weekly turnover constraint enforced in-solver
+  liquidity_i ≥ 3B KRW  (5-day ADTV)
 ```
 
 ### Risk Management

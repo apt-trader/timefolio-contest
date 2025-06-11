@@ -47,8 +47,8 @@ def find_latest_validation_file(directory: str = "validated_universes",
         global_logger.error(f"Error finding latest validation file: {str(e)}")
         return None
 
-# ── 로깅 설정 ─────────────────────────────────────────────────────────────
-global_logger = logging.getLogger("cvar_opt")
+ # ── 로깅 설정 ─────────────────────────────────────────────────────────────
+global_logger = logging.getLogger("portfolio_optimizer")
 global_logger.setLevel(logging.INFO)
 if not global_logger.handlers:
     ch = logging.StreamHandler()
@@ -60,7 +60,7 @@ def alert(msg: str):
     if url:
         try:
             import requests
-            requests.post(url, json={"text": f"[cvar-opt] {msg}"}, timeout=3)
+            requests.post(url, json={"text": f"[portfolio_optimizer] {msg}"}, timeout=3)
         except Exception as e:
             global_logger.warning(f"Slack alert failed: {e}")
 
@@ -92,9 +92,7 @@ class Config:
         
         # 최적화 파라미터 
         opt = root.get('optimization', {})
-        self.sharpe_treynor_weight = opt.get('sharpe_treynor_weight', 0.5)
-        self.cvar_alpha            = opt.get('cvar_alpha', 0.05)
-        self.return_weight         = opt.get('return_weight', 2.0)
+        # self.cvar_alpha            = opt.get('cvar_alpha', 0.05)  # Removed CVaR parameter
         
         # individual max per‐stock weight from config.optimization.individual_limit
         self.individual_limit      = opt.get('individual_limit', 0.15)
@@ -212,7 +210,11 @@ class DataManager:
         arr = winsorize(rets.values, limits=[0.01, 0.01])
         return pd.DataFrame(arr, index=rets.index, columns=rets.columns)
 
-class CVaROptimizer:
+class PortfolioOptimizer:
+    """
+    Portfolio optimizer maximizing PCR-Sharpe ratio with HHI & Return-HHI penalties
+    enforces position, sector, and turnover constraints in-solver.
+    """
     def __init__(self, cfg: Config, data: DataManager, beta_vec: pd.Series):
         self.cfg = cfg
         self.data = data
@@ -315,16 +317,39 @@ class CVaROptimizer:
         # Create binary variables for position selection
         z = cp.Variable(n, boolean=True)  # Binary variable for position inclusion
         w = cp.Variable(n)                # Continuous variable for weights
+        # Auxiliary variables for turnover constraint
+        u = cp.Variable(n, nonneg=True)
+        prev_w = self.data.get_previous_weights()  # series or array of w_prev
         
         # Portfolio return and risk
         portfolio_return = mu.T @ w
         portfolio_risk = cp.quad_form(w, cov)
-        
-        # Big-M constant (must be larger than any possible weight)
-        M = 1.0
-        
-        # Objective: Maximize risk-adjusted return
-        objective = cp.Maximize(portfolio_return - risk_aversion * portfolio_risk)
+
+        # --- HHI and Return-HHI penalties ---
+        cfg = self.cfg
+        expected_returns = expected
+        # Compute HHI penalty (already present)
+        lambda_hhi = cfg.get('lambda_hhi', 10.0)
+        hhi_weight_threshold = cfg.get('hhi_weight_threshold', 0.08)
+        hhi_penalty = lambda_hhi * cp.pos(cp.sum_squares(w) - hhi_weight_threshold)
+
+        # Compute Return-HHI penalty
+        lambda_return_hhi = cfg.get('lambda_return_hhi', 10.0)
+        return_hhi_threshold = cfg.get('return_hhi_threshold', 0.30)
+        # Approximate Return-HHI: (sum((w*μ)^2) / (sum(w*μ))^2)
+        mu_vec = expected_returns.values
+        numerator = cp.sum_squares(cp.multiply(w, mu_vec))
+        denominator = cp.square(cp.sum(cp.multiply(w, mu_vec)) + 1e-10)
+        ret_hhi_expr = numerator / denominator
+        return_hhi_penalty = lambda_return_hhi * cp.pos(ret_hhi_expr - return_hhi_threshold)
+
+        # New objective: maximize return minus risk, HHI and Return-HHI penalties
+        objective = cp.Maximize(
+            portfolio_return
+            - 0.5 * portfolio_risk
+            - hhi_penalty
+            - return_hhi_penalty
+        )
         
         # Constraints
         constraints = [
@@ -334,6 +359,13 @@ class CVaROptimizer:
             w >= z * min_weight,                 # If z=1, w >= min_weight
             cp.sum(z) == n_positions,            # Exactly n_positions
             cp.norm(w, 2) <= 0.4                # L2 norm constraint for diversification
+        ]
+        # Turnover constraint: enforce weekly turnover >= min_turnover
+        min_turnover = self.cfg.min_turnover  # 0.05
+        constraints += [
+            u >= w - prev_w,
+            u >= prev_w - w,
+            cp.sum(u) >= min_turnover
         ]
         
         # Log optimization settings
@@ -345,7 +377,7 @@ class CVaROptimizer:
         global_logger.info(f"- Using config file: {self.cfg.stock_universe_file}")
         global_logger.info(f"- Individual limit: {self.cfg.individual_limit*100:.1f}%")
         global_logger.info(f"- Return weight: {self.cfg.return_weight}")
-        global_logger.info(f"- CVaR alpha: {self.cfg.cvar_alpha}")
+        # global_logger.info(f"- CVaR alpha: {self.cfg.cvar_alpha}")  # Removed CVaR alpha logging
         
         # Create and solve problem
         prob = cp.Problem(objective, constraints)

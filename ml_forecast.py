@@ -822,7 +822,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Create dummy data for testing
-    from cvar_optimizer_revamped import Config, DataManager
+    from portfolio_optimizer import Config, DataManager
     
     cfg = Config("config.yaml")
     dm = DataManager(cfg)

@@ -18,7 +18,7 @@ from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import squareform
 import cvxpy as cp
 
-from cvar_optimizer_revamped import Config, DataManager, CVaROptimizer
+from portfolio_optimizer import Config, DataManager, CVaROptimizer
 from dynamic_weighting import get_dynamic_weights, save_beta_state, visualize_beta_history
 from factor_engine import FactorEngine
 

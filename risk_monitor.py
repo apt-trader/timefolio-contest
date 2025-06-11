@@ -820,7 +820,7 @@ def calculate_benchmark_tracking(date_str=None):
 
 if __name__ == "__main__":
     import argparse
-    from cvar_optimizer_revamped import Config, DataManager
+    from portfolio_optimizer import Config, DataManager
     
     parser = argparse.ArgumentParser(description="Generate portfolio risk report")
     parser.add_argument("--config", default="config.yaml", help="Path to config file")
