@@ -1,8 +1,6 @@
 # TimeFolio Portfolio System
 
-A production-grade workflow for building, back-testing, and monitoring Korean equity portfolios that comply with the TimeFolio contest rules (≤ 15% per stock, sector cap = max(2 × market-weight, 10%), weekly turnover ≥ 5%). The system implements a six-stage workflow that transforms raw market data into optimized portfolios while adhering to strict compliance rules and risk management protocols.
-
-The system is built with a modular architecture that allows for easy extension and customization of individual components while maintaining a clean separation of concerns.
+A modular system for building and managing Korean equity portfolios that comply with TimeFolio contest rules. It features a six-stage workflow from data ingestion to portfolio execution, with built-in risk management and compliance controls.
 
 ## Table of Contents
 
@@ -14,8 +12,6 @@ The system is built with a modular architecture that allows for easy extension a
 6. [CLI Usage Examples](#cli-usage-examples)  
 7. [License & Acknowledgements](#license--acknowledgements)
 
----
-
 ## System Architecture
 
 ```
@@ -25,35 +21,55 @@ The system is built with a modular architecture that allows for easy extension a
   │ KRX Fetcher │ │ Financial Fetcher │ │ Macro Fetcher │ 
   └──────┬──────┘ └─────────┬─────────┘ └───────┬───────┘ 
 ╚═══════════════════════════════════════════════════════╝
-         │                  │                    │
-         ▼                  ▼                    ▼
+         │                  │                   │
+         ▼                  ▼                   ▼
 ╔═══════════════════════════════════════════════════════╗
                   II. Data Manager                    
    - Centralized data access & caching               
    - Handles raw data storage (SQLite)               
    - Manages data validation & cleaning              
+   - Implements request throttling and retry logic   
+   - Maintains data consistency during market holidays
 ╚═══════════════════════════════════════════════════════╝
                            │
                            ▼
 ╔═══════════════════════════════════════════════════════╗
                   III. Factor Engine                   
-  - Computes investment factors                 
-  - Handles factor calculations                 
-  - Manages factor persistence                  
+  - Computes investment factors (Momentum, Mean Reversion)  
+  - Handles factor calculations and standardization  
+  - Manages factor persistence and normalization     
+  - Implements volatility-adjusted calculations     
+  - Generates composite factor scores               
 ╚═══════════════════════════════════════════════════════╝
                            │
                            ▼
 ╔═══════════════════════════════════════════════════════╗
                   IV. Portfolio Optimizer                 
   - Generates target portfolio allocations      
-  - Implements optimization strategies          
-  - Manages risk constraints                    
+  - Implements optimization strategies (CVXPY)  
+  - Manages risk constraints and position limits
+  - Handles sector exposure and turnover constraints
+  - Implements L2 regularization for diversification    
 ╚═══════════════════════════════════════════════════════╝
                            │
                            ▼
 ╔═══════════════════════════════════════════════════════╗
-                  V. Risk Monitoring System                    
-  - Executes trades based on target portfolio   
+                  V. Risk Monitoring System              
+  - Tracks portfolio risk metrics (MDD, HHI, etc.)    
+  - Implements real-time alerts via Slack/Email        
+  - Generates comprehensive risk reports               
+  - Enforces compliance with trading rules             
+  - Monitors position concentration and drawdowns      
+╚═══════════════════════════════════════════════════════╝
+                           │
+                           ▼
+╔═══════════════════════════════════════════════════════╗
+                  VI. Portfolio Execution                 
+  - Generates trade lists and order routing           
+  - Handles implementation shortfall optimization     
+  - Manages transaction cost modeling                 
+  - Trades execution and position tracking            
+  - Updates portfolio performance metrics             
 ╚═══════════════════════════════════════════════════════╝
 ```
 The system follows a unidirectional data flow where each component processes data and passes it to the next stage, with feedback loops for performance analysis and optimization.
@@ -67,8 +83,6 @@ The system follows a unidirectional data flow where each component processes dat
   - **DART** (`DART_API_KEY`)
   - **FRED** (`FRED_API_KEY`)
 - Required Python packages (see `requirements.txt`)
-
----
 
 ## Installation
 
@@ -130,24 +144,30 @@ data_fetch:
 #### 1. Market Data (KRX)
 - **Module**: `krx_fetcher.py`
 - **Features**:
-  - Fetches historical price and volume data from KRX
-  - Implements request throttling and retry logic
-  - Caches responses to minimize API calls
-  - Handles KRX's OTP-based authentication
+  - Fetches historical OHLCV data from KRX
+  - Implements OTP-based authentication
+  - Handles rate limiting with exponential backoff
+  - Caches responses locally to minimize API calls
+  - Computes technical indicators (SMA, RSI, etc.)
+  - Stores data in `daily_prices` table
 
 #### 2. Financial Data (DART)
 - **Module**: `financial_fetcher.py`
 - **Features**:
-  - Retrieves financial statements using OpenDART API
+  - Interfaces with OpenDartReader API
   - Handles rate limiting and daily quotas
-  - Parses XBRL data into structured format
+  - Parses XBRL financial statements
+  - Computes fundamental ratios (P/E, P/B, etc.)
+  - Updates `financials` table with standardized metrics
 
 #### 3. Macroeconomic Data
 - **Module**: `macro_fetcher.py`
 - **Features**:
-  - Fetches economic indicators from FRED
-  - Retrieves VIX and other market sentiment indicators
-  - Normalizes data for use in factor models
+  - Fetches economic indicators from FRED/Yahoo
+  - Tracks yield curves and credit spreads
+  - Normalizes time series data
+  - Updates `macro_data` table
+  - Implements data quality checks
 
 ### II. Data Manager
 - **Module**: `data_manager.py`
@@ -209,55 +229,66 @@ data_fetch:
 
 ---
 
-## CLI Usage Examples
+## CLI Usage
 
-```bash
-# 1. Backfill market data
-python backfill_krx_data.py --start-date 20220101 --end-date 20250711
-  - Implements data validation and cleaning
-  - Supports both KOSPI and KOSDAQ markets
-  - Maintains data consistency during market holidays
+### 1. Update Market Data (Run at the start of each week)
+   ```bash
+   # Backfill any missing market data (only needed if there were holidays/errors)
+   python backfill_krx_data.py --start-date $(date -v-7d "+%Y%m%d") --end-date $(date "+%Y%m%d")
+   
+   # Fetch fresh market data (past 30 days)
+   python krx_fetcher.py -s $(date -v-30d "+%Y%m%d") -e $(date "+%Y%m%d")
+   
+   # Update financial statements (past year)
+   python financial_fetcher.py -s $(date -v-1y "+%Y%m%d") -e $(date "+%Y%m%d")
+   
+   # Update macroeconomic data (past year)
+   python macro_fetcher.py -s $(date -v-1y "+%Y%m%d") -e $(date "+%Y%m%d")
+   ```
 
-```bash
-# 2. Fetch market,financial,macro data
-python krx_fetcher.py -i 005930 -s 20200101 -e 20241231
-python financial_fetcher.py -i 005930 -s 20200101 -e 20241231
-python macro_fetcher.py -i 005930 -s 20200101 -e 20241231
+### 2. Generate Portfolio (After data updates)
+   ```bash
+   python competition_portfolio.py \
+     --config config.yaml \
+     --positions 12 \
+     --out-dir output/
+   ```
 
-# 3. Generate portfolio
-python competition_portfolio.py \
-  --config config.yaml \
-  --positions 12 \
-  --out-dir output/
+### 3. Monitor Risk (Run daily/continuously)
+  ```bash
+   python risk_monitor.py --config config/risk_config.yaml
+   ```
 
-# 4. Monitor risk
-python risk_monitor.py --config config/risk_config.yaml
-```
+### 4. Backtest Portfolio (Additional command)
+  
+  ```bash
+  python backtest_portfolio.py --start-date 20240101 --end-date 20241231
+  ```
 
----
+### 5. Update Universe (Additional command)
+  
+  ```bash
+  python update_universe.py --market KOSPI --min-cap 100000000000  # 100B KRW
+  ```
 
-## License & Acknowledgements
+**Notes**
+- Use `nohup` or `tmux` for long-running processes
+- Check `logs/` directory for execution logs
+- Set up alerts for any failures in the workflow
 
-- **License**: MIT
-- **Data Sources**:
-  - Korea Exchange (KRX)
-  - DART (Data Analysis, Retrieval and Transfer System)
-  - FRED Economic Data
-- **Libraries**:
-  - Pandas, NumPy, SciPy
-  - CVXPY
-  - scikit-learn
-  - SQLAlchemy
+### 6. Factor Engine (`factor_engine.py`)
+Implements a multi-factor model for alpha generation.
 
----
+**Key Features:**
+- **Momentum Factors**
+  - 20/60/120-day price momentum
+  - Volatility-adjusted returns
+  - Cross-sectional normalization
 
-## Maintenance
-
-For support or to report issues, please open an issue on our GitHub repository.
-- **Universe Management**
-  - Multi-encoding support for universe files
-  - Ticker validation against market data
-  - Sector and market cap validation
+- **Mean Reversion**
+  - RSI (14-day default)
+  - Price deviation from moving averages
+  - Short-term reversal signals
 
 ### 7. Risk Monitoring System (`risk_monitor.py`)
 - **Risk Metrics**
@@ -272,49 +303,14 @@ For support or to report issues, please open an issue on our GitHub repository.
   - Slack integration for team notifications
   - Daily risk reports
 
-### 8. Backtesting Framework (`backtest.py`)
-- **Walk-Forward Validation**
-  - Implements rolling window backtesting
-  - Supports daily and weekly rebalancing
-  - Tracks key performance metrics
-  - Generates detailed performance reports
-
-### 9. Factor Engine (`factor_engine.py`)
-Implements a multi-factor model for alpha generation.
-
-**Key Features:**
-- **Momentum Factors**
-  - 20/60/120-day price momentum
-  - Volatility-adjusted returns
-  - Cross-sectional normalization
-
-- **Mean Reversion**
-  - RSI (14-day default)
-  - Price deviation from moving averages
-  - Short-term reversal signals
-
-### 10. Compliance Filters (`compliance_filters.py`)
+### 8. Compliance Filters (`compliance_filters.py`)
 - **Stock Screening**
   - 3 billion KRW minimum 5-day average volume
   - 90-day minimum trading history
   - KRX caution/warning status monitoring
   - Automatic maintenance of restricted stock list
 
-
-
-## Data Management
-
-### Data Pipeline
-- **Data Sources**
-  - Local cache for offline use
-  - Fallback to FinanceDataReader when needed
-
-### Performance Features
-- **Caching**
-  - Disk-based caching of price data
-  - In-memory caching for frequent queries
-  - Automatic cache invalidation
-  - Efficient data structures for large datasets
+---
 
 ## Technical Framework
 
@@ -348,6 +344,8 @@ Constraints:
 - **Momentum Factors**: 20/60/120-day price momentum
 - **Mean Reversion**: RSI and price deviation signals
 
+---
+
 ## Risk Management Protocols
 
 ### Position Monitoring
@@ -360,7 +358,7 @@ Constraints:
 ### Portfolio Risk Controls
 - **Concentration Limits**:
   - Max 15% per position (40% for Samsung Electronics)
-  - Max (2× market weight,10%)
+  - Max 2× market weight or 10%
   - HHI weight threshold: 0.08
   - HHI return threshold: 0.30
 
@@ -371,30 +369,27 @@ Constraints:
   - Liquidity constraints
   - Turnover compliance
 
-- **Alerts**:
-  - Email for critical issues
-  - Slack for team notifications
-  - Daily risk reports
-
-## Troubleshooting
-
-### Data Issues
-- **KRX Maintenance**: Check KRX website for scheduled maintenance
-- **API Limits**: Verify KIS API key usage and limits
-- **Cache**: Clear cache with `rm -rf data/cache/*` if needed
-
-### Optimization Issues
-- **Infeasible Solution**: Check constraint parameters in config
-- **Solver Errors**: Try different solvers (ECOS, SCS, OSQP)
-- **Numerical Issues**: Scale returns or adjust solver settings
-
-### Performance Issues
-- **Slow Execution**: Reduce universe size or use weekly data
-- **Memory Usage**: Process data in smaller chunks
-- **Model Drift**: Retrain models with recent data
+---
 
 ## Outputs
 - Portfolio Weights: `output/current_portfolio.csv`
 - Risk Report: `output/risk_report.md`
 - Performance Metrics: `output/performance_metrics.json`
 - Logs: `logs/optimization_*.log`
+
+---
+
+## License & Acknowledgements
+
+- **License**: MIT
+- **Data Sources**:
+  - Korea Exchange (KRX)
+  - DART (Data Analysis, Retrieval and Transfer System)
+  - FRED Economic Data
+- **Libraries**:
+  - Pandas, NumPy, SciPy
+  - CVXPY
+  - scikit-learn
+  - SQLAlchemy
+
+For support or to report issues, please open an issue on our GitHub repository.
