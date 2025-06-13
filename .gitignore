@@ -9,3 +9,6 @@ cache/
 out/
 krx_data.db
 logs/
+.env
+.env
+.env

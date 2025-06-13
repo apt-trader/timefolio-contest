@@ -1,20 +1,6 @@
 # TimeFolio Portfolio System
 
-A production-grade workflow for building, back-testing, and monitoring Korean equity portfolios that comply with the TimeFolio contest rules (≤ 15% per stock, sector cap = max(2 × market-weight, 10%), weekly turnover ≥ 5%). The system implements a six-stage workflow that transforms raw market data into optimized portfolios while adhering to strict compliance rules and risk management protocols.
-
-The system is built with a modular architecture that allows for easy extension and customization of individual components while maintaining a clean separation of concerns.
-
-## Table of Contents
-
-1. [System Architecture](#system-architecture)  
-2. [Prerequisites](#prerequisites)  
-3. [Installation](#installation)  
-4. [Configuration](#configuration)  
-5. [Workflow Components](#workflow-components)  
-6. [CLI Usage Examples](#cli-usage-examples)  
-7. [License & Acknowledgements](#license--acknowledgements)
-
----
+A production-grade system for building and stress-testing Korean equity portfolios that satisfy the TimeFolio contest rules (≤ 15% per stock, sector cap = max(2 × market-weight, 10%), weekly turnover ≥ 5%).
 
 ## System Architecture
 
@@ -54,210 +40,238 @@ The system is built with a modular architecture that allows for easy extension a
 ╔═══════════════════════════════════════════════════════╗
                   V. Risk Monitoring System                    
   - Executes trades based on target portfolio   
+  - Handles order routing                       
+  - Manages position tracking                   
+╚═══════════════════════════════════════════════════════╝
+                           │
+                           ▼
+╔═══════════════════════════════════════════════════════╗
+                  VI. Portfolio Management                 
+  - Executes trades based on target portfolio   
+  - Handles order routing                       
+  - Manages position tracking                   
 ╚═══════════════════════════════════════════════════════╝
 ```
-The system follows a unidirectional data flow where each component processes data and passes it to the next stage, with feedback loops for performance analysis and optimization.
 
-## Prerequisites
+## Pre-Contest Checklist
 
-- Python 3.8+
-- SQLite 3
-- UNIX-style shell or Windows PowerShell
-- Valid API keys:
-  - **DART** (`DART_API_KEY`)
-  - **FRED** (`FRED_API_KEY`)
-- Required Python packages (see `requirements.txt`)
+> **Note**: For the July 2025 contest, ensure all pre-contest checks are completed before the competition starts.
 
----
+### 1-2 Weeks Before Contest
+- [ ] Update universe files with latest stock listings
+- [ ] Clear `forbidden.csv` to reset liquidity restrictions
+- [ ] Run full backtest with recent market data
+- [ ] Verify sector weight limits and position constraints
 
-## Installation
+### 1-2 Days Before Start
+- [ ] Run `backfill_krx_data.py --start-date 20220701 --end-date 20250711`
+- [ ] Verify data integrity in SQLite database
+- [ ] Execute dry-run with `--dry-run` flag
+
+### Contest Day
+- [ ] Review generated portfolio in `output/` directory
+- [ ] Check risk metrics and compliance reports
+- [ ] Manually verify top positions against latest news
+
+## KRX Data FetcherM
+
+### Key Features
+- Fetches daily OHLCV data for all KOSPI and KOSDAQ stocks using their OTP-based download system
+- Handles rate limiting and automatic retries
+- Stores data in an efficient SQLite database
+- Supports incremental updates and backfilling
+- Includes comprehensive error handling and logging
+
+### Backfilling Data
+To backfill historical data, use the provided script:
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/your-org/timefolio-2025.git
-cd timefolio-2025
+# Backfill with default settings (weekly update)
+python backfill_krx_data.py --start-date 20220701 --end-date 20250704
+python backfill_krx_data.py --start-date 20220707 --end-date 20250711
 
-# 2. Create and activate virtual environment
+# With custom delay settings
+python backfill_krx_data.py --min-delay 3 --max-delay 7
+```
+
+### Database Schema
+Data is stored in an SQLite database with the following schema:
+
+```sql
+CREATE TABLE daily_prices (
+    code TEXT,
+    date DATE,
+    open REAL,
+    high REAL,
+    low REAL,
+    close REAL,
+    volume INTEGER,
+    value INTEGER,
+    market TEXT,
+    name TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (code, date)
+)
+```
+
+## Setup Preparations
+
+### 1. Environment Setup
+```bash
+# Create and activate virtual environment
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Set up environment variables
-cp .env.example .env
-# Edit .env with your API keys
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
----
-
-## Configuration
-
-The system is configured via `config.yaml` in the root directory. Key sections include:
-
-```yaml
-data_settings:
-  stock_universe_file: "validated_universes/sector_universe_latest.csv"
-  market_sectors_file: "market_sectors.csv"
-  start_date: '2022-01-01'
-  end_date: '2025-09-30'
-  cache_dir: 'cache'
-  output_dir: 'out'
-
-optimization:
-  individual_limit: 0.15     # max 15% per stock
-  risk_aversion: 1.0         # λ in μᵀw - λ·wᵀΣw - η·∥w∥₂²
-  l2_penalty: 0.1            # η for concentration control
-  max_positions: 12
-  rebalance_step_days: 5
-
-risk_management:
-  mdd_threshold_6m: 0.15
-  hhi_weight_threshold: 0.20
-  # Additional risk parameters...
-
-data_fetch:
-  max_attempts: 3
-  retry_delay: 5
-```
-
----
-
-## Workflow Components
-
-### I. Data Ingestion
-
-#### 1. Market Data (KRX)
-- **Module**: `krx_fetcher.py`
-- **Features**:
-  - Fetches historical price and volume data from KRX
-  - Implements request throttling and retry logic
-  - Caches responses to minimize API calls
-  - Handles KRX's OTP-based authentication
-
-#### 2. Financial Data (DART)
-- **Module**: `financial_fetcher.py`
-- **Features**:
-  - Retrieves financial statements using OpenDART API
-  - Handles rate limiting and daily quotas
-  - Parses XBRL data into structured format
-
-#### 3. Macroeconomic Data
-- **Module**: `macro_fetcher.py`
-- **Features**:
-  - Fetches economic indicators from FRED
-  - Retrieves VIX and other market sentiment indicators
-  - Normalizes data for use in factor models
-
-### II. Data Manager
-- **Module**: `data_manager.py`
-- **Key Functions**:
-  - `load_sector_codes()`: Loads universe of stocks
-  - `get_latest_close()`: Retrieves most recent prices
-  - `create_price_df()`: Standardizes price data format
-- **Features**:
-  - Centralized data access layer
-  - Handles data validation and cleaning
-  - Implements caching for performance
-
-### III. Factor Engine
-- **Module**: `factor_engine.py`
-- **Factor Types**:
-  1. **Momentum** (20/60/120-day lookback)
-  2. **Mean Reversion** (RSI + Bollinger Bands)
-  3. **Liquidity** (5-day average volume)
-- **Features**:
-  - Volatility-adjusted factor calculations
-  - Z-score normalization
-  - Composite score generation
-
-### IV. Portfolio Optimizer
-- **Module**: `portfolio_optimizer.py`
-- **Optimization Problem**:
-  ```
-  max_w μᵀw - λ·wᵀΣw - η·∥w∥₂²
-  s.t. Σw = 1, w ≥ 0
-  ```
-- **Constraints**:
-  - Individual position limits (≤ 15%)
-  - Sector exposure limits
-  - Turnover constraints
-- **Implementation**:
-  - Uses CVXPY for convex optimization
-  - Implements L2 regularization for diversification
-  - Handles cardinality constraints
-
-### V. Risk Monitoring
-- **Module**: `risk_monitor.py`
-- **Metrics Tracked**:
-  - Maximum Drawdown (6M/12M)
-  - Portfolio Concentration (HHI)
-  - Turnover
-  - Tracking Error
-- **Features**:
-  - Real-time alerts via Slack/Email
-  - Automated reporting
-  - Threshold-based notifications
-
-### VI. Portfolio Execution
-- **Module**: `execution.py`
-- **Features**:
-  - Trade list generation
-  - Implementation shortfall optimization
-  - Transaction cost modeling
-  - Broker integration
-
----
-
-## CLI Usage Examples
-
+### 2. Install Dependencies
 ```bash
-# 1. Backfill market data
-python backfill_krx_data.py --start-date 20220101 --end-date 20250711
+# Core requirements (includes KRX fetcher dependencies)
+pip install -r requirements-combined.txt
+
+# Verify installation
+python -c "import pandas as pd; print(f'Success! pandas version: {pd.__version__}')"
+```
+
+### 3. Initial Data Setup
+```bash
+# Create necessary directories
+mkdir -p data/processed validated_universes output
+
+# Run initial data update
+python batch_update.py --start-date $(date -v-1y +%Y%m%d)
+
+# Verify data
+ls -lh data/processed/*.csv
+```
+
+### 4. Configuration
+1. Create a symlink to the latest universe file:
+   ```bash
+   # Create a symlink that always points to the latest universe file
+   cd validated_universes
+   ln -sf $(ls -t sector_universe_validated_* | head -1) sector_universe_latest.csv
+   ```
+
+2. Configure `config.yaml` with relative dates:
+   ```yaml
+   data_settings:
+     stock_universe_file: "validated_universes/sector_universe_latest.csv"
+     lookback_years: 3  # Automatically calculates start date from end_date
+     # end_date: YYYY-MM-DD  # Optional: defaults to today if not specified
+     
+   optimization:
+     # backtest_split_date: YYYY-MM-DD  # Optional: defaults to end_date if not specified
+     max_positions: 15
+     position_limit: 0.15  # 15% per position
+     sector_limit_multiplier: 2.0  # 2x market weight
+     min_turnover: 0.05
+     lambda_hhi: 10.0             # Penalty for weight HHI above threshold
+   ```
+
+3. Update market_sector.csv with new weights
+
+### 5. Verify Setup
+```bash
+# Dry run
+python competition_portfolio.py --config config.yaml --dry-run
+
+# Check logs
+tail -n 20 logs/optimization_*.log
+```
+
+### 6. Regular Updates
+```bash
+# Update market data (run weekly)
+python batch_update.py --start-date $(date -v-1w +%Y%m%d)
+
+# Retrain models (monthly)
+python -m ml_forecast.train
+
+# Generate new portfolio
+python competition_portfolio.py --config config.yaml --positions 15 --output-dir output
+```
+
+### 7. Configure API Access (optional)
+```bash
+# Set KIS API credentials
+export KIS_APP_KEY='your_key_here'
+export KIS_APP_SECRET='your_secret_here'
+
+# Test authentication
+python kis_auth.py --status
+python kis_auth.py --refresh
+```
+
+## Commands
+
+### Basic Run
+```bash
+# Update market data
+python batch_update.py --start-date 2025MMDD
+
+# Run portfolio optimization
+python competition_portfolio.py --config config.yaml --positions 15 --output-dir output
+```
+
+## Key Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `--config` | Path to YAML config file | `config.yaml` |
+| `--positions` | Target number of positions | 12 |
+| `--use-ml-forecast` | Enable ML return predictions | `False` |
+| `--tune-params` | Enable hyperparameter tuning | `False` |
+| `--n-tuning-calls` | Tuning iterations | 20 |
+| `--output-dir` | Output directory | `output` |
+| `--min-data-points` | Minimum data points required | 63 |
+| `--data-interval` | Data frequency | `1d` |
+
+## Key Components
+
+### 1. Data Manager (`data_manager.py`)
+- **Data Loading & Validation**
+  - Fetches market data from KIS API and other sources
+  - Validates data completeness and quality
+  - Implements retry logic with exponential backoff
+  - Handles KRX maintenance periods gracefully
+  - Caches data locally for performance
+
+### 2. Enhanced Data Loader (`data_loader.py`)
+- **Risk-Free Rate Management**
+  - Fetches 3-month KTB yields from KIS API
+  - Implements 1-week TTL caching
+  - Fallback to cached values during KRX maintenance
+  - Configurable update frequency
+
+- **Data Processing**
+  - Handles multiple data frequencies (daily/weekly/monthly)
   - Implements data validation and cleaning
   - Supports both KOSPI and KOSDAQ markets
   - Maintains data consistency during market holidays
 
-```bash
-# 2. Fetch market,financial,macro data
-python krx_fetcher.py -i 005930 -s 20200101 -e 20241231
-python financial_fetcher.py -i 005930 -s 20200101 -e 20241231
-python macro_fetcher.py -i 005930 -s 20200101 -e 20241231
-
-# 3. Generate portfolio
-python competition_portfolio.py \
-  --config config.yaml \
-  --positions 12 \
-  --out-dir output/
-
-# 4. Monitor risk
-python risk_monitor.py --config config/risk_config.yaml
-```
-
----
-
-## License & Acknowledgements
-
-- **License**: MIT
-- **Data Sources**:
-  - Korea Exchange (KRX)
-  - DART (Data Analysis, Retrieval and Transfer System)
-  - FRED Economic Data
-- **Libraries**:
-  - Pandas, NumPy, SciPy
-  - CVXPY
-  - scikit-learn
-  - SQLAlchemy
-
----
-
-## Maintenance
-
-For support or to report issues, please open an issue on our GitHub repository.
 - **Universe Management**
   - Multi-encoding support for universe files
   - Ticker validation against market data
   - Sector and market cap validation
+
+### 3. Orchestration (`competition_portfolio.py`)
+- Loads data, runs factor engine (PCA+PCR) & portfolio optimizer
+- Executes risk monitoring & exports results
+
+### 4. Portfolio Optimizer (`portfolio_optimizer.py`)
+- **Core solver** maximizing wᵀ·r̂ − λ_risk·wᵀΣw − λ_HHI·∑w_i²
+- Enforces position (≤15%), sector caps, and in-solver turnover (≥5%) constraints
+- Mixed-integer programming for exact position counts with convex fallback
+- Logs detailed metrics from `portfolio_metrics.py`
+
+### 5. Portfolio Metrics (`portfolio_metrics.py`)
+- **Optimization Framework**
+  - Implements PCR-Sharpe ratio optimization
+  - Uses Ledoit-Wolf shrinkage for covariance estimation
+  - Enforces 15% position limits (40% for Samsung Electronics)
+  - Implements sector constraints (2× market weight cap)
+  - Enforces 5% minimum weekly turnover
+  - Supports mixed-integer programming for exact position counts
 
 ### 7. Risk Monitoring System (`risk_monitor.py`)
 - **Risk Metrics**
@@ -306,6 +320,7 @@ Implements a multi-factor model for alpha generation.
 
 ### Data Pipeline
 - **Data Sources**
+  - KIS API for market data
   - Local cache for offline use
   - Fallback to FinanceDataReader when needed
 
@@ -347,6 +362,7 @@ Constraints:
 ### Alpha Generation
 - **Momentum Factors**: 20/60/120-day price momentum
 - **Mean Reversion**: RSI and price deviation signals
+- **ML Forecasts**: XGBoost-based return predictions
 
 ## Risk Management Protocols
 
@@ -360,7 +376,7 @@ Constraints:
 ### Portfolio Risk Controls
 - **Concentration Limits**:
   - Max 15% per position (40% for Samsung Electronics)
-  - Max (2× market weight,10%)
+  - Max 40% per sector (2× market weight)
   - HHI weight threshold: 0.08
   - HHI return threshold: 0.30
 

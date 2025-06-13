@@ -325,30 +325,15 @@ class PortfolioOptimizer:
         portfolio_return = mu.T @ w
         portfolio_risk = cp.quad_form(w, cov)
 
-        # --- HHI and Return-HHI penalties ---
-        cfg = self.cfg
-        expected_returns = expected
-        # Compute HHI penalty (already present)
-        lambda_hhi = cfg.get('lambda_hhi', 10.0)
-        hhi_weight_threshold = cfg.get('hhi_weight_threshold', 0.08)
-        hhi_penalty = lambda_hhi * cp.pos(cp.sum_squares(w) - hhi_weight_threshold)
+        # --- L2 Regularization Penalty ---
+        eta = self.cfg.get('l2_penalty', 0.1)  # L2 penalty coefficient
+        l2_penalty = eta * cp.sum_squares(w)
 
-        # Compute Return-HHI penalty
-        lambda_return_hhi = cfg.get('lambda_return_hhi', 10.0)
-        return_hhi_threshold = cfg.get('return_hhi_threshold', 0.30)
-        # Approximate Return-HHI: (sum((w*μ)^2) / (sum(w*μ))^2)
-        mu_vec = expected_returns.values
-        numerator = cp.sum_squares(cp.multiply(w, mu_vec))
-        denominator = cp.square(cp.sum(cp.multiply(w, mu_vec)) + 1e-10)
-        ret_hhi_expr = numerator / denominator
-        return_hhi_penalty = lambda_return_hhi * cp.pos(ret_hhi_expr - return_hhi_threshold)
-
-        # New objective: maximize return minus risk, HHI and Return-HHI penalties
+        # New objective: maximize return minus risk and L2 penalty
         objective = cp.Maximize(
             portfolio_return
-            - 0.5 * portfolio_risk
-            - hhi_penalty
-            - return_hhi_penalty
+            - self.cfg.get('risk_aversion', 1.0) * portfolio_risk
+            - l2_penalty
         )
         
         # Constraints
@@ -453,22 +438,28 @@ class PortfolioOptimizer:
         if (weights > 0).sum() > n_positions:
             # If we have more than n_positions due to min_weight, keep only top n
             top_n = weights.nlargest(n_positions).index
-            weights = weights[top_tickers].reindex(weights.index, fill_value=0.0)
-        
-        return weights.astype(float)
-        # Log results
-        global_logger.info("\n=== OPTIMIZATION RESULTS ===")
+            weights = weights[top_n].reindex(weights.index, fill_value=0.0)
+
+        # Convert to float type and renormalize
+        weights = weights.astype(float)
+        weights = weights / weights.sum()
+
+        # Log fallback optimization results
+        global_logger.info("\n=== FALLBACK OPTIMIZATION RESULTS ===")
         try:
+            cov = np.cov(rets.T) * 252  # Annualized covariance
+            mu = rets.mean().values
             portfolio_vol = np.sqrt(weights @ cov @ weights)
-            global_logger.info(f"Expected return: {(mu @ weights):.2%}")
+            expected_return = (mu @ weights)
+            global_logger.info(f"Expected return: {expected_return:.2%}")
             global_logger.info(f"Portfolio volatility: {portfolio_vol:.2%}")
         except Exception as e:
             global_logger.warning(f"Could not calculate portfolio statistics: {e}")
-        
+
         # Log all positions with weights > 0.1%
         positions = weights[weights > 0.001].sort_values(ascending=False)
-        global_logger.info(f"\nPortfolio Positions ({len(positions)}):")
+        global_logger.info(f"Fallback Portfolio Positions ({len(positions)}):")
         for ticker, weight in positions.items():
             global_logger.info(f"{ticker}: {weight*100:.2f}%")
-        
+
         return weights

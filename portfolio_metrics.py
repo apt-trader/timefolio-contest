@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import cvxpy as cp
 from sklearn.covariance import LedoitWolf
-from sklearn.decomposition import PCA
+
 from typing import Dict, List, Tuple, Optional, Any
 import warnings
 from scipy.stats import gmean
@@ -36,64 +36,6 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
-def calculate_pcr_sharpe(returns: pd.DataFrame, 
-                         risk_free_rate: float = 0.0,
-                         explained_variance: float = 0.95) -> np.ndarray:
-    """
-    Calculate PCR-Sharpe ratio using PCA and Ledoit-Wolf shrinkage.
-    
-    Args:
-        returns: DataFrame of asset returns (T x N)
-        risk_free_rate: Annual risk-free rate (default: 0.0)
-        explained_variance: Minimum variance to explain with PCA (0-1)
-        
-    Returns:
-        Array of PCR-Sharpe ratios (N,)
-    """
-    centered_returns = returns - returns.mean()
-    n_assets = len(returns.columns)
-    
-    # Apply Ledoit-Wolf shrinkage
-    lw = LedoitWolf()
-    lw.fit(centered_returns)
-    sigma = lw.covariance_
-    
-    # Apply PCA
-    pca = PCA(n_components=min(10, n_assets-1))
-    pca.fit(centered_returns)
-    
-    # Calculate number of components to explain desired variance
-    explained_variance_ratio = np.cumsum(pca.explained_variance_ratio_)
-    n_components = np.argmax(explained_variance_ratio >= explained_variance) + 1
-    n_components = max(1, min(n_components, len(explained_variance_ratio)))
-    
-    # Get factor loadings and returns
-    components = pca.components_[:n_components].T  # N x K
-    factor_returns = centered_returns @ components  # T x K
-    
-    # Calculate factor covariance with jitter for numerical stability
-    if factor_returns.ndim == 1 or factor_returns.shape[1] == 1:
-        # Handle single factor case
-        factor_cov = np.atleast_2d(np.var(factor_returns, ddof=1) + 1e-10)
-    else:
-        factor_cov = np.cov(factor_returns, rowvar=False)
-        # Add small jitter to diagonal
-        jitter = 1e-10 * np.eye(factor_cov.shape[0])
-        factor_cov = 0.5 * (factor_cov + factor_cov.T) + jitter
-    
-    # Calculate factor risk: sum((loadings @ factor_cov) * loadings, axis=1)
-    factor_risk = np.sum((components @ factor_cov) * components, axis=1)
-    
-    # Calculate residual variance
-    residuals = centered_returns - factor_returns @ components.T
-    residual_var = np.sum(residuals**2, axis=0) / (len(returns) - 1)  # Unbiased estimator
-    
-    # Calculate PCR-Sharpe with annualization
-    annual_factor = 252  # Default for daily data
-    mu = returns.mean() * annual_factor - risk_free_rate  # Excess returns
-    total_risk = np.sqrt(factor_risk + residual_var + 1e-10)
-    
-    return mu / (total_risk + 1e-10)
 
 def calculate_diversification_metrics(weights: np.ndarray, 
                                    cov_matrix: np.ndarray,
@@ -242,12 +184,7 @@ class PortfolioOptimizer:
         z = cp.Variable(n_assets, boolean=True)
         w = cp.Variable(n_assets)
         
-        # Calculate metrics with instance's risk-free rate
-        pcr_sharpe = calculate_pcr_sharpe(
-            returns, 
-            risk_free_rate=self.risk_free_rate / 252,  # Convert annual to daily
-            explained_variance=0.95
-        )
+        # [Removed calculation of pcr_sharpe]
         
         # Portfolio return and risk
         portfolio_return = expected_returns.values @ w
@@ -262,10 +199,9 @@ class PortfolioOptimizer:
         
         # Objective function - DCP compliant
         objective = cp.Maximize(
-            portfolio_return - 
-            0.5 * portfolio_risk -  # Risk aversion
-            hhi_penalty +  # Convex penalty for HHI
-            cfg.get('sharpe_treynor_weight', 0.5) * (pcr_sharpe @ w)  # Linear term
+            portfolio_return
+            - cfg.get('risk_aversion', 1.0) * portfolio_risk
+            - cfg.get('lambda_hhi', 10.0) * cp.sum_squares(w)
         )
         
         # Constraints - all DCP compliant
@@ -319,7 +255,7 @@ class PortfolioOptimizer:
                     self.logger.warning("MIP solution has too many positions, trying convex relaxation")
                     raise cp.SolverError("Too many positions in MIP solution")
                     
-                return self._process_solution(weights, returns, cov, pcr_sharpe)
+                return self._process_solution(weights, returns, cov)
                 
             except (cp.SolverError, ValueError) as e:
                 self.logger.warning(f"MIP optimization failed: {e}")
@@ -345,7 +281,7 @@ class PortfolioOptimizer:
                 
                 # Process and return the solution
                 weights = pd.Series(w.value, index=returns.columns)
-                return self._process_solution(weights, returns, cov, pcr_sharpe)
+                return self._process_solution(weights, returns, cov)
                 
             except Exception as e:
                 self.logger.error(f"Convex optimization failed: {e}")
@@ -356,14 +292,13 @@ class PortfolioOptimizer:
         return self._fallback_weights(returns, n_positions, min_weight, max_weight)
     
     def _process_solution(self, weights: pd.Series, returns: pd.DataFrame, 
-                         cov: np.ndarray, pcr_sharpe: np.ndarray) -> pd.Series:
+                         cov: np.ndarray) -> pd.Series:
         """Process and validate optimization solution."""
         weights[weights < 1e-6] = 0
         weights = weights / weights.sum()
         
         # Calculate metrics
         self.metrics = calculate_diversification_metrics(weights.values, cov, returns)
-        self.metrics['pcr_sharpe'] = pcr_sharpe @ weights
         
         # Calculate post-optimization Return-HHI
         if len(returns) > 0:

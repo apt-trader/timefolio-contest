@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Risk monitoring system for TimeFolio portfolio.
 Tracks rolling maximum drawdown, Herfindahl-Hirschman Index (concentration),

@@ -98,7 +98,7 @@ class KRXDataFetcher:
     def _init_database(self):
         """Initialize the SQLite database with required tables."""
         with sqlite3.connect(self.db_path) as conn:
-            # Create daily price table
+            # Create daily price table with additional factor columns
             conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_prices (
                 code TEXT,
@@ -111,6 +111,15 @@ class KRXDataFetcher:
                 value INTEGER,
                 market TEXT,
                 name TEXT,
+                momentum_1m REAL,
+                momentum_6_12m REAL,
+                momentum_12m REAL,
+                vol_20d REAL,
+                beta REAL,
+                turnover_ratio REAL,
+                breakout_52w_high REAL,
+                breakout_52w_low REAL,
+                volume_momentum REAL,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (code, date)
             )
@@ -334,7 +343,94 @@ class KRXDataFetcher:
                 # Select and order columns
                 final_columns = ['code', 'name', 'open', 'high', 'low', 'close', 'volume', 'value', 'date', 'market']
                 df = df[final_columns].copy()
-                
+
+                # Compute additional factors
+                # Load historical prices up to this date
+                import sqlite3
+                # Defensive: if df is empty, skip
+                if not df.empty:
+                    # Use the first code in df to get historical data for factors
+                    code_for_hist = df.iloc[0]['code']
+                    date_for_hist = date_str
+                    # Load historical prices for this code
+                    hist = pd.read_sql(
+                        "SELECT date, close, high, low, volume FROM daily_prices WHERE code = ? AND date <= ? ORDER BY date",
+                        sqlite3.connect(self.db_path),
+                        params=[code_for_hist, date_for_hist],
+                        parse_dates=['date']
+                    )
+                    if not hist.empty:
+                        hist = hist.set_index('date').sort_index()
+                        # 1-month momentum
+                        df['momentum_1m'] = df.apply(lambda row: (row['close'] / hist['close'].shift(21).loc[row['date']] - 1)
+                            if row['date'] in hist.index and len(hist) > 21 else None, axis=1)
+                        # 6-12 month momentum
+                        df['momentum_6_12m'] = df.apply(lambda row: ((row['close'] / hist['close'].shift(252).loc[row['date']]) -
+                                                    (row['close'] / hist['close'].shift(21).loc[row['date']]))
+                            if row['date'] in hist.index and len(hist) > 252 else None, axis=1)
+                        # 12+ month momentum
+                        df['momentum_12m'] = df.apply(lambda row: (row['close'] / hist['close'].shift(252).loc[row['date']] - 1)
+                            if row['date'] in hist.index and len(hist) > 252 else None, axis=1)
+                        # 20-day volatility
+                        vol_20d_series = hist['close'].pct_change().rolling(20).std() * (252**0.5)
+                        df['vol_20d'] = df['date'].map(vol_20d_series)
+                        # Beta to KOSPI
+                        kospi = pd.read_sql(
+                            "SELECT date, close FROM daily_prices WHERE code = 'KOSPI' AND date <= ? ORDER BY date",
+                            sqlite3.connect(self.db_path),
+                            params=[date_for_hist],
+                            parse_dates=['date']
+                        )
+                        kospi = kospi.set_index('date').sort_index()
+                        returns_i = hist['close'].pct_change()
+                        returns_m = kospi['close'].pct_change().reindex(returns_i.index)
+                        cov = returns_i.rolling(20).cov(returns_m)
+                        var = returns_m.rolling(20).var()
+                        beta_series = cov / var
+                        df['beta'] = df['date'].map(beta_series)
+                        # Turnover ratio
+                        # Shares outstanding is assumed constant; add a 'listed_shares' column in the table or fetch externally
+                        if 'listed_shares' in df.columns:
+                            df['turnover_ratio'] = df['volume'] / df['listed_shares']
+                        else:
+                            df['turnover_ratio'] = None
+                        # 52-week breakout high/low
+                        if 'high' in hist.columns and 'low' in hist.columns:
+                            high_52w = hist['high'].rolling(252).max()
+                            low_52w = hist['low'].rolling(252).min()
+                            df['breakout_52w_high'] = df.apply(lambda row: (row['close'] / high_52w.loc[row['date']] - 1)
+                                if row['date'] in high_52w.index else None, axis=1)
+                            df['breakout_52w_low'] = df.apply(lambda row: (row['close'] / low_52w.loc[row['date']] - 1)
+                                if row['date'] in low_52w.index else None, axis=1)
+                        else:
+                            df['breakout_52w_high'] = None
+                            df['breakout_52w_low'] = None
+                        # Volume momentum (e.g. 20-day avg change)
+                        vol_mom = hist['volume'].rolling(20).mean().pct_change()
+                        df['volume_momentum'] = df['date'].map(vol_mom)
+                    else:
+                        # No historical data
+                        df['momentum_1m'] = None
+                        df['momentum_6_12m'] = None
+                        df['momentum_12m'] = None
+                        df['vol_20d'] = None
+                        df['beta'] = None
+                        df['turnover_ratio'] = None
+                        df['breakout_52w_high'] = None
+                        df['breakout_52w_low'] = None
+                        df['volume_momentum'] = None
+                else:
+                    # If df is empty
+                    df['momentum_1m'] = None
+                    df['momentum_6_12m'] = None
+                    df['momentum_12m'] = None
+                    df['vol_20d'] = None
+                    df['beta'] = None
+                    df['turnover_ratio'] = None
+                    df['breakout_52w_high'] = None
+                    df['breakout_52w_low'] = None
+                    df['volume_momentum'] = None
+
                 results[mkt] = df
                 logger.info(f"Fetched {len(df)} rows for {mkt} on {date_str}")
                 
@@ -408,9 +504,15 @@ class KRXDataFetcher:
         # Ensure date is in the correct format
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         
-        # Select and order columns for database
-        db_columns = ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'value', 'market', 'name']
-        df = df.reindex(columns=[col for col in db_columns if col in df.columns])
+        # Select and order columns for database, including new factor columns
+        db_columns = [
+            'code', 'date', 'open', 'high', 'low', 'close', 'volume', 'value', 'market', 'name',
+            'momentum_1m', 'momentum_6_12m', 'momentum_12m', 'vol_20d', 'beta',
+            'turnover_ratio', 'breakout_52w_high', 'breakout_52w_low', 'volume_momentum'
+        ]
+        # Only include columns present in df
+        db_columns_in_df = [col for col in db_columns if col in df.columns]
+        df = df.reindex(columns=db_columns_in_df)
         
         with sqlite3.connect(self.db_path) as conn:
             # Use a transaction for atomic update

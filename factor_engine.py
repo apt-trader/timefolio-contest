@@ -1,9 +1,14 @@
 """Enhanced factor engine for Korean equity portfolio optimization."""
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 from scipy.stats import zscore
 import logging
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
+from sklearn.pipeline import Pipeline
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -152,6 +157,135 @@ class FactorEngine:
         # Combine masks
         valid_mask = liquidity_mask & price_mask
         return valid_mask
+
+    def find_optimal_components(self,
+                              factors: Dict[str, pd.DataFrame],
+                              returns: pd.Series,
+                              max_components: int = None,
+                              n_splits: int = 5) -> Tuple[int, float]:
+        """
+        Find the optimal number of principal components using time-series cross-validation.
+        
+        Args:
+            factors: dict of factor DataFrames
+            returns: Series of realized returns
+            max_components: maximum number of components to consider
+            n_splits: number of time-series cross-validation splits
+            
+        Returns:
+            Tuple of (best_n_components, best_mse)
+        """
+        # Prepare factor matrix X and return vector y
+        factor_df = pd.concat([factors['momentum'],
+                              factors['mean_reversion'],
+                              factors['liquidity'],
+                              factors['composite']], 
+                             axis=1, 
+                             keys=['momentum', 'mean_reversion', 'liquidity', 'composite'])
+        
+        # Flatten multiindex columns to single level
+        X = factor_df.stack(level=0).dropna()
+        y = returns.loc[X.index]
+        
+        if max_components is None:
+            max_components = min(X.shape[1], 10)  # Default to min(10, n_features)
+        
+        # Create pipeline with standardization, PCA, and linear regression
+        pipe = Pipeline([
+            ('scaler', StandardScaler()),
+            ('pca', PCA()),
+            ('lr', LinearRegression())
+        ])
+        
+        # Parameter grid for number of components
+        param_grid = {
+            'pca__n_components': list(range(1, max_components + 1))
+        }
+        
+        # Time-series cross-validation
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        
+        # Grid search with time-series CV
+        grid = GridSearchCV(
+            pipe,
+            param_grid,
+            scoring='neg_mean_squared_error',
+            cv=tscv,
+            n_jobs=-1
+        )
+        
+        # Fit the model
+        grid.fit(X, y)
+        
+        # Get best parameters and score
+        best_m = grid.best_params_['pca__n_components']
+        best_mse = -grid.best_score_
+        
+        logger.info(f"Optimal number of components: {best_m} (MSE: {best_mse:.6f})")
+        return best_m, best_mse
+
+    def pca_predict(self,
+                   factors: Dict[str, pd.DataFrame],
+                   returns: pd.Series,
+                   n_components: int = None,
+                   use_cv: bool = True) -> pd.Series:
+        """
+        Perform Principal Component Regression (PCR) to predict next-period returns.
+        
+        Args:
+            factors: dict of factor DataFrames
+            returns: Series of realized returns
+            n_components: number of principal components to use (if None, use CV to find optimal)
+            use_cv: whether to use cross-validation to find optimal components
+            
+        Returns:
+            Series of predicted returns for each ticker
+        """
+        # Prepare factor matrix X and return vector y
+        factor_df = pd.concat([factors['momentum'],
+                              factors['mean_reversion'],
+                              factors['liquidity'],
+                              factors['composite']], 
+                             axis=1, 
+                             keys=['momentum', 'mean_reversion', 'liquidity', 'composite'])
+        
+        # Flatten multiindex columns to single level
+        X = factor_df.stack(level=0).dropna()
+        y = returns.loc[X.index]
+        
+        # Find optimal number of components if not specified
+        if n_components is None or use_cv:
+            n_components, _ = self.find_optimal_components(factors, returns)
+        
+        # Standardize features
+        self.scaler = StandardScaler()
+        X_std = self.scaler.fit_transform(X)
+        
+        # Fit PCA
+        self.pca = PCA(n_components=n_components)
+        Z = self.pca.fit_transform(X_std)
+        
+        # Fit linear regression
+        self.lr = LinearRegression()
+        self.lr.fit(Z, y)
+        
+        # Prepare latest factor data for prediction
+        latest_factors = pd.concat([factors['momentum'].iloc[-1],
+                                   factors['mean_reversion'].iloc[-1],
+                                   factors['liquidity'].iloc[-1],
+                                   factors['composite'].iloc[-1]], 
+                                  axis=1, 
+                                  keys=['momentum', 'mean_reversion', 'liquidity', 'composite'])
+        
+        # Standardize and transform latest data
+        X_latest = latest_factors.stack().unstack(level=1)
+        X_latest_std = self.scaler.transform(X_latest)
+        Z_latest = self.pca.transform(X_latest_std)
+        
+        # Make predictions
+        pred = self.lr.predict(Z_latest)
+        
+        return pd.Series(pred, index=latest_factors.index)
 
 # Example usage
 if __name__ == "__main__":

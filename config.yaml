@@ -20,12 +20,8 @@ optimization:
   risk_free_rate: 0.0441          # 10Y 국채 4.41%
   optimization_timeout: 300       # Increase from 60 to 300 seconds
   max_retries: 5                  # Increase from 3 to 5
-  lambda_hhi: 10.0                 # Penalty weight for HHI > threshold
-  hhi_weight_threshold: 0.08       # Maximum acceptable weight HHI
-  lambda_return_hhi: 10.0          # Penalty weight for Return-HHI > threshold
-  return_hhi_threshold: 0.30       # Maximum acceptable P&L concentration
-  ml_train_window_days: 252       # 1-year look-back for ML forecaster
-  risk_train_window_days: 504     # 2-year look-back for PCA-based risk model
+  risk_aversion: 1.0              # Weight for variance term in QP objective
+  l2_penalty: 0.1                 # Coefficient for L2 regularization (concentration control)
   ewma_decay_cov: 0.97            # EWMA decay for covariance (half-life ≈ 23d)
   ewma_decay_mean: 0.99           # EWMA decay for mean returns
   validation_window: '6M'         # 6-month walk-forward folds
@@ -35,13 +31,8 @@ optimization:
 risk_management:
   monte_carlo_iterations: 1000    # Number of MC simulations
   stress_test_dates:
-    - '2022-03-10'               # Example inflation shock dates
+    - '2022-03-10'                # Example inflation shock dates
     - '2022-09-15'
-
-# Beta regime tracking
-beta_regime:
-  smoothing_alpha: 0.2            # Exponential smoothing factor
-  max_jump: 0.3                   # Max allowed jump in beta
 
 # Data-fetch and retries
 data_fetch:

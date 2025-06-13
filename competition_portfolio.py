@@ -5,28 +5,30 @@ import logging
 import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple
 
-import yaml
 import numpy as np
 import pandas as pd
-import seaborn as sns
 import matplotlib.pyplot as plt
-import FinanceDataReader as fdr
-from pandas_datareader import data as pdr
-from scipy.cluster.hierarchy import linkage, fcluster
-from scipy.spatial.distance import squareform
 import cvxpy as cp
 
-from portfolio_optimizer import Config, DataManager, CVaROptimizer
-from dynamic_weighting import get_dynamic_weights, save_beta_state, visualize_beta_history
+from portfolio_optimizer import Config, DataManager, optimize_portfolio
+
 from factor_engine import FactorEngine
 
 # Import non-ML modules that are always needed
 from risk_monitor import generate_risk_report, RiskMonitor
-from compliance_filters import filter_universe, load_forbidden_tickers
+from compliance_filters import load_forbidden_tickers
 
-# ML and tuning modules will be imported conditionally
+# Portfolio metrics import
+from portfolio_metrics import compute_covariance
+from portfolio_metrics import calculate_diversification_metrics
+
+# --- Fetcher imports for factor integration ---
+import sqlite3
+from krx_fetcher import KRXFetcher
+from financial_fetcher import FinancialsFetcher
+from macro_fetcher import MacroFetcher
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -128,6 +130,14 @@ def main():
     # Initialize configuration and data manager
     cfg = Config(args.config)
     dm = DataManager(cfg)
+    # Inject sector limits into config for use in optimizer constraints
+    cfg.sector_limits = dm.sector_limits
+
+    # Initialize data fetchers
+    krx = KRXFetcher(db_path=cfg.db_path if hasattr(cfg, 'db_path') else 'krx_data.db')
+    fin = FinancialsFetcher(api_key=os.getenv('DART_API_KEY'), db_path=cfg.db_path if hasattr(cfg, 'db_path') else 'krx_data.db')
+    macro = MacroFetcher(fred_api_key=os.getenv('FRED_API_KEY'))
+    DB_PATH = cfg.db_path if hasattr(cfg, 'db_path') else 'krx_data.db'
     
     # Get date range for data fetching
     end_date = pd.Timestamp(cfg.end_date)
@@ -168,13 +178,29 @@ def main():
         logger.warning(f"Failed to fetch returns using DataManager: {str(e)}")
         logger.info("Falling back to simple returns calculation")
         new_rets = rets.copy()
-    
+
+    # --- Asset-level technical factors via KRXFetcher ---
+    krx_factors = krx.fetch_and_compute(clean_tickers, end_date.strftime('%Y-%m-%d'))
+    # --- Fundamental factors via FinancialsFetcher ---
+    # Ensure financials for codes are fetched (annual reports)
+    fin.fetch_financials(clean_tickers, years=[int(cfg.end_date[:4]), int(cfg.end_date[:4]) - 1], report_type='annual')
+    prices_df = pd.DataFrame({'close': prices.iloc[-1]}).T  # code-indexed latest close
+    fin_factors = fin.compute_financial_factors(prices_df, end_date.strftime('%Y-%m-%d'))
+    # --- Macro & regime factors via MacroFetcher ---
+    macro.fetch_and_store(end_date.strftime('%Y-%m-%d'))
+    macro_df = pd.read_sql(
+        "SELECT * FROM macro_data WHERE date = ?", 
+        sqlite3.connect(DB_PATH), 
+        params=[end_date.strftime('%Y-%m-%d')],
+        parse_dates=['date']
+    ).set_index('date').iloc[0]
+
     # 1. Calculate dynamic beta
     logger.info("Calculating dynamic beta...")
     market_returns = rets.mean(axis=1)
     var_mkt = market_returns.var()
     beta_vec = rets.apply(lambda x: x.cov(market_returns) / var_mkt)
-    
+
     # 2. Initialize Factor Engine and calculate factors
     logger.info("Initializing Factor Engine...")
     factor_engine = FactorEngine(
@@ -184,11 +210,18 @@ def main():
         min_volume=3e9,
         volume_window=5
     )
-    
+
     logger.info("Calculating factors...")
     try:
-        # Calculate all factors
-        factors = factor_engine.calculate_factors(prices, volumes)
+        # Merge all factors into a single DataFrame
+        factors = prices.to_frame('close').join(krx_factors, how='left')
+        factors = factors.join(fin_factors, how='left')
+        for col, val in macro_df.items():
+            factors[col] = val
+        # Now pass `factors` to the engine
+        factors_input = factors
+        # Calculate all factors using the merged DataFrame
+        factors = factor_engine.calculate_factors(factors_input, volumes)
         
         # Calculate factor scores with the new factor structure
         factor_scores = pd.DataFrame(index=factors['composite'].index)
@@ -249,39 +282,20 @@ def main():
         
         latest_scores = factor_scores['composite'].iloc[-1]
         
-        # 4. ML-based return forecasting (if enabled)
-        if args.use_ml_forecast:
-            logger.info(f"Generating ML forecasts using {args.ml_model} model...")
-            try:
-                from ml_forecast import forecast_returns
-                ml_returns = forecast_returns(
-                    rets, 
-                    model_type=args.ml_model,
-                    use_cached=True,
-                    train_if_missing=True
-                )
-                # Blend factor scores with ML forecasts
-                ml_weight = 0.7  # Weight for ML forecasts
-                factor_returns = latest_scores * 0.2 / np.sqrt(252)
-                expected_returns = ml_weight * ml_returns + (1 - ml_weight) * factor_returns
-                logger.info("Successfully blended factor scores with ML forecasts")
-            except Exception as e:
-                logger.error(f"ML forecast failed: {e}")
-                logger.info("Falling back to factor-based returns")
-                expected_returns = latest_scores * 0.2 / np.sqrt(252)
-        else:
-            expected_returns = latest_scores * 0.2 / np.sqrt(252)
-        
-        # Ensure we have expected returns for all assets
-        expected_returns = expected_returns.reindex(rets.columns, fill_value=0)
+        # 4. PCR-based return prediction
+        logger.info("Generating PCR-based return predictions...")
+        # Predict expected returns using PCA-based PCR
+        expected_returns = factor_engine.pca_predict(
+            factors,
+            new_rets.mean(axis=0),  # average historical returns per ticker
+            cfg.pca_components
+        )
         
     except Exception as e:
         logger.error(f"Error in factor calculation: {str(e)}")
         logger.warning("Falling back to simple mean returns")
         expected_returns = rets.mean()
     
-    # Initialize optimizer with dynamic beta
-    optimizer = CVaROptimizer(cfg, dm, beta_vec)
     
     # 5. Calculate risk metrics
     logger.info("Calculating risk metrics...")
@@ -292,14 +306,19 @@ def main():
         logger.info(f"Portfolio CVaR (95%): {risk_metrics['cvar_95']:.2%}")
     except Exception as e:
         logger.warning(f"Could not calculate risk metrics: {e}")
-    
-    # Run optimization with factor-based expected returns
-    logger.info("Running portfolio optimization...")
-    weights = optimizer.optimise(
-        rets=rets,
-        expected=expected_returns,
-        n_positions=args.positions
-    )
+
+    # Run optimization with QP-based mean-variance + L2 penalty
+    logger.info("Running portfolio optimization (QP)...")
+    mu = expected_returns.values
+    Sigma = rets.cov().values * 252  # Annualized covariance
+    lambda_ = cfg.risk_aversion
+    eta = cfg.l2_penalty
+    w_opt = optimize_portfolio(mu, Sigma, lambda_, eta)
+    weights = pd.Series(w_opt, index=rets.columns).nlargest(args.positions)
+    # Calculate and log diversification metrics (effective N, diversification ratio)
+    cov_matrix = rets[weights.index].cov().values * 252  # Annualized covariance
+    div_metrics = calculate_diversification_metrics(weights.values, cov_matrix, rets[weights.index])
+    logger.info(f"Effective N: {div_metrics['effective_n']:.2f}, Diversification Ratio: {div_metrics['diversification_ratio']:.2f}")
     
     # Create output directory if it doesn't exist
     output_dir = Path(args.out_dir)
