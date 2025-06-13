@@ -9,8 +9,11 @@ A modular system for building and managing Korean equity portfolios that comply 
 3. [Installation](#installation)  
 4. [Configuration](#configuration)  
 5. [Workflow Components](#workflow-components)  
-6. [CLI Usage Examples](#cli-usage-examples)  
-7. [License & Acknowledgements](#license--acknowledgements)
+6. [CLI Usage](#cli-usage)
+7. [Technical Framework](#technical-framework)
+8. [Risk Management Protocols](#risk-management-protocols)
+9. [Outputs](#outputs)
+10. [License & Acknowledgements](#license--acknowledgements)
 
 ## System Architecture
 
