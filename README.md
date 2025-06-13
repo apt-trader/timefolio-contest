@@ -276,40 +276,6 @@ data_fetch:
 - Check `logs/` directory for execution logs
 - Set up alerts for any failures in the workflow
 
-### 6. Factor Engine (`factor_engine.py`)
-Implements a multi-factor model for alpha generation.
-
-**Key Features:**
-- **Momentum Factors**
-  - 20/60/120-day price momentum
-  - Volatility-adjusted returns
-  - Cross-sectional normalization
-
-- **Mean Reversion**
-  - RSI (14-day default)
-  - Price deviation from moving averages
-  - Short-term reversal signals
-
-### 7. Risk Monitoring System (`risk_monitor.py`)
-- **Risk Metrics**
-  - Tracks 6M and 12M rolling maximum drawdown
-  - Monitors HHI concentration (weight and return)
-  - Enforces 5% minimum weekly turnover
-  - Implements position-level MDD triggers
-
-- **Alert System**
-  - Configurable alert thresholds
-  - Email notifications for critical issues
-  - Slack integration for team notifications
-  - Daily risk reports
-
-### 8. Compliance Filters (`compliance_filters.py`)
-- **Stock Screening**
-  - 3 billion KRW minimum 5-day average volume
-  - 90-day minimum trading history
-  - KRX caution/warning status monitoring
-  - Automatic maintenance of restricted stock list
-
 ---
 
 ## Technical Framework
@@ -343,6 +309,40 @@ Constraints:
 ### Alpha Generation
 - **Momentum Factors**: 20/60/120-day price momentum
 - **Mean Reversion**: RSI and price deviation signals
+
+### Factor Engine (`factor_engine.py`)
+Implements a multi-factor model for alpha generation.
+
+**Key Features:**
+- **Momentum Factors**
+  - 20/60/120-day price momentum
+  - Volatility-adjusted returns
+  - Cross-sectional normalization
+
+- **Mean Reversion**
+  - RSI (14-day default)
+  - Price deviation from moving averages
+  - Short-term reversal signals
+
+### Risk Monitoring System (`risk_monitor.py`)
+- **Risk Metrics**
+  - Tracks 6M and 12M rolling maximum drawdown
+  - Monitors HHI concentration (weight and return)
+  - Enforces 5% minimum weekly turnover
+  - Implements position-level MDD triggers
+
+- **Alert System**
+  - Configurable alert thresholds
+  - Email notifications for critical issues
+  - Slack integration for team notifications
+  - Daily risk reports
+
+### Compliance Filters (`compliance_filters.py`)
+- **Stock Screening**
+  - 3 billion KRW minimum 5-day average volume
+  - 90-day minimum trading history
+  - KRX caution/warning status monitoring
+  - Automatic maintenance of restricted stock list
 
 ---
 
