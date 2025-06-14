@@ -5,13 +5,13 @@ This module provides a robust interface for fetching historical market data from
 using their OTP-based download system. It handles throttling, error recovery,
 and data persistence.
 """
-import os
+#
 import time
 import sqlite3
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List
 from io import BytesIO
 import pandas as pd
 import requests
@@ -49,7 +49,7 @@ class KRXDataFetcher:
     - Database persistence
     """
     
-    def __init__(self, cache_dir: str = "krx_cache", db_path: str = "krx_data.db", 
+    def __init__(self, cache_dir: str = "krx_cache", db_path: str = str(Path(__file__).parent / "krx_data.db"), 
                  throttle: float = 0.25, max_retries: int = 3):
         """
         Initialize the KRX data fetcher.
@@ -63,6 +63,8 @@ class KRXDataFetcher:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True, parents=True)
         self.db_path = db_path
+        # Persistent SQLite connection
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.throttle = throttle
         self.max_retries = max_retries
         self.last_request = 0
@@ -97,7 +99,8 @@ class KRXDataFetcher:
     
     def _init_database(self):
         """Initialize the SQLite database with required tables."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self.conn:
+            conn = self.conn
             # Create daily price table with additional factor columns
             conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_prices (
@@ -258,8 +261,7 @@ class KRXDataFetcher:
             logger.error(f"Failed to download/parse data: {e}")
             raise
     
-    def fetch_daily_data(self, date: Union[str, datetime], 
-                         markets: List[str] = None) -> Dict[str, pd.DataFrame]:
+    def fetch_daily_data(self, date, markets: List[str] = None) -> Dict[str, pd.DataFrame]:
         """
         Fetch daily data for all tickers in specified markets.
         
@@ -344,96 +346,8 @@ class KRXDataFetcher:
                 final_columns = ['code', 'name', 'open', 'high', 'low', 'close', 'volume', 'value', 'date', 'market']
                 df = df[final_columns].copy()
 
-                # Compute additional factors
-                # Load historical prices up to this date
-                import sqlite3
-                # Defensive: if df is empty, skip
-                if not df.empty:
-                    # Use the first code in df to get historical data for factors
-                    code_for_hist = df.iloc[0]['code']
-                    date_for_hist = date_str
-                    # Load historical prices for this code
-                    hist = pd.read_sql(
-                        "SELECT date, close, high, low, volume FROM daily_prices WHERE code = ? AND date <= ? ORDER BY date",
-                        sqlite3.connect(self.db_path),
-                        params=[code_for_hist, date_for_hist],
-                        parse_dates=['date']
-                    )
-                    if not hist.empty:
-                        hist = hist.set_index('date').sort_index()
-                        # 1-month momentum
-                        df['momentum_1m'] = df.apply(lambda row: (row['close'] / hist['close'].shift(21).loc[row['date']] - 1)
-                            if row['date'] in hist.index and len(hist) > 21 else None, axis=1)
-                        # 6-12 month momentum
-                        df['momentum_6_12m'] = df.apply(lambda row: ((row['close'] / hist['close'].shift(252).loc[row['date']]) -
-                                                    (row['close'] / hist['close'].shift(21).loc[row['date']]))
-                            if row['date'] in hist.index and len(hist) > 252 else None, axis=1)
-                        # 12+ month momentum
-                        df['momentum_12m'] = df.apply(lambda row: (row['close'] / hist['close'].shift(252).loc[row['date']] - 1)
-                            if row['date'] in hist.index and len(hist) > 252 else None, axis=1)
-                        # 20-day volatility
-                        vol_20d_series = hist['close'].pct_change().rolling(20).std() * (252**0.5)
-                        df['vol_20d'] = df['date'].map(vol_20d_series)
-                        # Beta to KOSPI
-                        kospi = pd.read_sql(
-                            "SELECT date, close FROM daily_prices WHERE code = 'KOSPI' AND date <= ? ORDER BY date",
-                            sqlite3.connect(self.db_path),
-                            params=[date_for_hist],
-                            parse_dates=['date']
-                        )
-                        kospi = kospi.set_index('date').sort_index()
-                        returns_i = hist['close'].pct_change()
-                        returns_m = kospi['close'].pct_change().reindex(returns_i.index)
-                        cov = returns_i.rolling(20).cov(returns_m)
-                        var = returns_m.rolling(20).var()
-                        beta_series = cov / var
-                        df['beta'] = df['date'].map(beta_series)
-                        # Turnover ratio
-                        # Shares outstanding is assumed constant; add a 'listed_shares' column in the table or fetch externally
-                        if 'listed_shares' in df.columns:
-                            df['turnover_ratio'] = df['volume'] / df['listed_shares']
-                        else:
-                            df['turnover_ratio'] = None
-                        # 52-week breakout high/low
-                        if 'high' in hist.columns and 'low' in hist.columns:
-                            high_52w = hist['high'].rolling(252).max()
-                            low_52w = hist['low'].rolling(252).min()
-                            df['breakout_52w_high'] = df.apply(lambda row: (row['close'] / high_52w.loc[row['date']] - 1)
-                                if row['date'] in high_52w.index else None, axis=1)
-                            df['breakout_52w_low'] = df.apply(lambda row: (row['close'] / low_52w.loc[row['date']] - 1)
-                                if row['date'] in low_52w.index else None, axis=1)
-                        else:
-                            df['breakout_52w_high'] = None
-                            df['breakout_52w_low'] = None
-                        # Volume momentum (e.g. 20-day avg change)
-                        vol_mom = hist['volume'].rolling(20).mean().pct_change()
-                        df['volume_momentum'] = df['date'].map(vol_mom)
-                    else:
-                        # No historical data
-                        df['momentum_1m'] = None
-                        df['momentum_6_12m'] = None
-                        df['momentum_12m'] = None
-                        df['vol_20d'] = None
-                        df['beta'] = None
-                        df['turnover_ratio'] = None
-                        df['breakout_52w_high'] = None
-                        df['breakout_52w_low'] = None
-                        df['volume_momentum'] = None
-                else:
-                    # If df is empty
-                    df['momentum_1m'] = None
-                    df['momentum_6_12m'] = None
-                    df['momentum_12m'] = None
-                    df['vol_20d'] = None
-                    df['beta'] = None
-                    df['turnover_ratio'] = None
-                    df['breakout_52w_high'] = None
-                    df['breakout_52w_low'] = None
-                    df['volume_momentum'] = None
-
                 results[mkt] = df
                 logger.info(f"Fetched {len(df)} rows for {mkt} on {date_str}")
-                
             except Exception as e:
                 logger.error(f"Error fetching {mkt} data for {date_str}: {e}", exc_info=True)
                 if mkt in results:
@@ -457,18 +371,25 @@ class KRXDataFetcher:
         """
         if end_date is None:
             end_date = datetime.now()
-            
+
         # Convert to datetime objects if they're strings
         if isinstance(start_date, str):
             start_date = datetime.strptime(start_date, '%Y%m%d')
         if isinstance(end_date, str):
             end_date = datetime.strptime(end_date, '%Y%m%d')
-            
+
+        # Skip dates already present in database for incremental updates
+        existing_dates = set(d.strftime('%Y%m%d') for d in self.get_available_dates())
+
         # Generate business days in the range
         date_range = pd.bdate_range(start_date, end_date)
         all_data = []
-        
+
         for date in date_range:
+            date_str = date.strftime('%Y%m%d')
+            if date_str in existing_dates:
+                logger.info(f"Date {date_str} already exists in database, skipping incremental fetch")
+                continue
             try:
                 results = self.fetch_daily_data(date, markets)
                 for df in results.values():
@@ -476,11 +397,11 @@ class KRXDataFetcher:
             except Exception as e:
                 logger.error(f"Error processing {date}: {e}")
                 continue
-                
+
         if not all_data:
             logger.warning("No data was fetched")
             return pd.DataFrame()
-            
+
         return pd.concat(all_data, ignore_index=True)
     
     def update_database(self, df: pd.DataFrame) -> int:
@@ -514,9 +435,8 @@ class KRXDataFetcher:
         db_columns_in_df = [col for col in db_columns if col in df.columns]
         df = df.reindex(columns=db_columns_in_df)
         
-        with sqlite3.connect(self.db_path) as conn:
-            # Use a transaction for atomic update
-            cursor = conn.cursor()
+        with self.conn:
+            cursor = self.conn.cursor()
             cursor.execute("BEGIN TRANSACTION")
             
             try:
@@ -552,7 +472,8 @@ class KRXDataFetcher:
     
     def get_available_dates(self) -> pd.DatetimeIndex:
         """Get all dates with available data in the database."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self.conn:
+            conn = self.conn
             df = pd.read_sql(
                 "SELECT DISTINCT date FROM daily_prices ORDER BY date",
                 conn,
@@ -599,7 +520,8 @@ class KRXDataFetcher:
         query += " ORDER BY date"
         
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self.conn:
+                conn = self.conn
                 df = pd.read_sql(
                     query,
                     conn,
@@ -632,29 +554,35 @@ class KRXDataFetcher:
             return pd.DataFrame(columns=expected_columns + ['date']).set_index('date')
 
 
+    def __del__(self):
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+
+
 def main():
     """Example usage of the KRXDataFetcher."""
     import argparse
     
     parser = argparse.ArgumentParser(description='Fetch KRX market data')
-    parser.add_argument('--start-date', default=None, help='Start date (YYYYMMDD)')
-    parser.add_argument('--end-date', default=None, help='End date (YYYYMMDD)')
+    parser.add_argument('-s', '--start-date', required=True,
+                        type=lambda s: datetime.strptime(s, '%Y%m%d'),
+                        help='Start date (YYYYMMDD)')
+    parser.add_argument('-e', '--end-date', required=True,
+                        type=lambda s: datetime.strptime(s, '%Y%m%d'),
+                        help='End date (YYYYMMDD)')
     parser.add_argument('--market', default='ALL', choices=['STK', 'KSQ', 'ALL'], 
                        help='Market to fetch (STK=KOSPI, KSQ=KOSDAQ, ALL=both)')
     parser.add_argument('--update-db', action='store_true', help='Update database')
     args = parser.parse_args()
+
+    # Normalize to datetime
+    start_date = args.start_date
+    end_date   = args.end_date
     
     # Initialize fetcher
     fetcher = KRXDataFetcher(throttle=0.3)
-    
-    # Set date range
-    end_date = datetime.now()
-    if args.end_date:
-        end_date = datetime.strptime(args.end_date, '%Y%m%d')
-    
-    start_date = end_date - timedelta(days=30)  # Default to last 30 days
-    if args.start_date:
-        start_date = datetime.strptime(args.start_date, '%Y%m%d')
     
     # Set markets
     markets = ['STK', 'KSQ'] if args.market == 'ALL' else [args.market]
