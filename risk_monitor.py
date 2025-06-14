@@ -822,7 +822,7 @@ if __name__ == "__main__":
     from portfolio_optimizer import Config, DataManager
     
     parser = argparse.ArgumentParser(description="Generate portfolio risk report")
-    parser.add_argument("--config", default="config.yaml", help="Path to config file")
+    parser.add_argument("--config", default="config/config.yaml", help="Path to config file")
     parser.add_argument("--weights", required=True, help="Path to portfolio weights CSV")
     parser.add_argument("--previous-weights", help="Path to previous portfolio weights CSV")
     parser.add_argument("--alert-config", help="Path to alert configuration file")

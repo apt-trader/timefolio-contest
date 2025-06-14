@@ -109,7 +109,7 @@ def fetch_market_data(dm: DataManager, tickers: List[str],
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Portfolio Optimization')
-    parser.add_argument('-c', '--config', default='config.yaml')
+    parser.add_argument('-c', '--config', default='config/config.yaml')
     parser.add_argument('-p', '--positions', type=int, default=12)
     parser.add_argument('--use-ml-forecast', action='store_true', 
                         help='Use ML-based return forecasting')
