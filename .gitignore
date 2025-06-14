@@ -30,3 +30,13 @@ backup/krx_data_krx_fin.db
 docs_cache/
 krx_cache/
 logs/
+
+# System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Environment variables
+.env
