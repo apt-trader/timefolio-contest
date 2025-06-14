@@ -40,14 +40,16 @@ class FactorEngine:
 
     def calculate_factors(self, 
                         prices: pd.DataFrame, 
-                        volumes: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+                        volumes: pd.DataFrame,
+                        market_index: pd.Series) -> Dict[str, pd.DataFrame]:
         """
         Calculate all factors.
         
         Args:
             prices: DataFrame with price data (tickers as columns, datetime index)
             volumes: DataFrame with volume data (same structure as prices)
-            
+            market_index: Series of market index prices (aligned with prices.index)
+
         Returns:
             Dictionary of factor DataFrames
         """
@@ -58,12 +60,22 @@ class FactorEngine:
         vol_adj_momentum = self._calculate_vol_adj_momentum(prices, returns)
         mean_reversion = self._calculate_mean_reversion(prices, returns)
         liquidity = self._calculate_liquidity(volumes)
+
+        # Additional factors
+        beta = self._calculate_beta(prices, market_index)
+        turnover = self._calculate_turnover(volumes)
+        breakout = self._calculate_breakout(prices)
+        volume_momentum = self._calculate_volume_momentum(volumes)
         
         # 2. Combine factors
         factors = {
             'momentum': vol_adj_momentum,
             'mean_reversion': mean_reversion,
-            'liquidity': liquidity
+            'liquidity': liquidity,
+            'beta': beta,
+            'turnover': turnover,
+            'breakout': breakout,
+            'volume_momentum': volume_momentum
         }
         
         # 3. Create composite score (equal-weighted for now)
@@ -135,6 +147,40 @@ class FactorEngine:
         liquidity = (volume_liquidity * 0.7 + (volume_trend + 1) * 0.15)  # 70% level, 15% trend
         
         return liquidity
+
+    def _calculate_beta(self, 
+                        prices: pd.DataFrame, 
+                        market_index: pd.Series, 
+                        window: int = 120) -> pd.DataFrame:
+        """Calculate rolling beta vs. market index."""
+        rets = prices.pct_change()
+        mkt_ret = market_index.pct_change()
+        betas = {}
+        for ticker in prices.columns:
+            cov = rets[ticker].rolling(window).cov(mkt_ret)
+            var = mkt_ret.rolling(window).var()
+            betas[ticker] = cov / (var + 1e-8)
+        return pd.DataFrame(betas, index=prices.index)
+
+    def _calculate_turnover(self, 
+                            volumes: pd.DataFrame, 
+                            window: int = 5) -> pd.DataFrame:
+        """Calculate volume turnover over a lookback window."""
+        avg_vol = volumes.rolling(window).mean()
+        return avg_vol.pct_change().fillna(0)
+
+    def _calculate_breakout(self, 
+                            prices: pd.DataFrame, 
+                            window: int = 252) -> pd.DataFrame:
+        """Calculate 52-week high breakout."""
+        rolling_max = prices.rolling(window).max()
+        return (prices / (rolling_max + 1e-8)) - 1
+
+    def _calculate_volume_momentum(self, 
+                                   volumes: pd.DataFrame, 
+                                   window: int = 20) -> pd.DataFrame:
+        """Calculate volume momentum as pct change over lookback."""
+        return volumes.pct_change(window).fillna(0)
     
     def filter_universe(self, 
                        factors: Dict[str, pd.DataFrame], 
@@ -286,31 +332,3 @@ class FactorEngine:
         pred = self.lr.predict(Z_latest)
         
         return pd.Series(pred, index=latest_factors.index)
-
-# Example usage
-if __name__ == "__main__":
-    # Example data (replace with actual data loading)
-    dates = pd.date_range(start='2024-01-01', periods=100)
-    tickers = ['005930', '000660', '035420']  # Example tickers
-    
-    # Generate random price and volume data for demonstration
-    np.random.seed(42)
-    prices = pd.DataFrame(
-        np.cumprod(1 + np.random.normal(0.001, 0.02, (100, 3)), axis=0) * 50000,
-        index=dates,
-        columns=tickers
-    )
-    
-    volumes = pd.DataFrame(
-        np.random.lognormal(15, 0.5, (100, 3)),
-        index=dates,
-        columns=tickers
-    ) * 1e6  # Convert to KRW
-    
-    # Initialize and run factor engine
-    engine = FactorEngine()
-    factors = engine.calculate_factors(prices, volumes)
-    
-    # Show latest factor values
-    print("\nLatest Composite Scores:")
-    print(factors['composite'].iloc[-1].sort_values(ascending=False))
