@@ -21,3 +21,6 @@ logs/
 forbidden.csv
 market_sectors.csv
 sector_universe.csv
+
+# Exclude backup directory
+backup/
