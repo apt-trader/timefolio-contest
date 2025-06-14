@@ -3,14 +3,11 @@
 Data Manager for TimeFolio project
 Handles data loading and processing for KRX data
 """
-import os
-import pandas as pd
-import numpy as np
-from pathlib import Path
-from typing import List, Dict, Optional, Union, Any, Tuple
-from datetime import datetime, timedelta
-import sqlite3
 import logging
+import sqlite3
+import pandas as pd
+from pathlib import Path
+from typing import List, Dict
 
 # Configure logging
 logging.basicConfig(
@@ -20,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Path to the SQLite DB where KRX OHLCV + factors are stored
-KRX_DB_PATH = Path(__file__).parent.parent / "krx_data.db"
+KRX_DB_PATH = Path(__file__).parent / "krx_data.db"
 
 def load_sector_codes(path: str) -> List[str]:
     """
@@ -104,125 +101,6 @@ def create_price_df(data_dict: Dict[str, pd.DataFrame], column: str = 'close') -
     except Exception as e:
         logger.error(f"Error creating price DataFrame: {e}")
         return pd.DataFrame()
-    
-    r = requests.get(BASE + url, headers=headers, params=params, timeout=5)
-    r.raise_for_status()
-    
-    try:
-        # Use the _extract_rows helper to handle both API formats
-        rows = _extract_rows(r.json())
-        return pd.DataFrame(rows)
-    except Exception as e:
-        logger.error(f"Error parsing stock listing info: {e}")
-        return pd.DataFrame()
-
-# Create cache directories
-CACHE = pathlib.Path.home() / "KRX_cache"
-CACHE.mkdir(exist_ok=True)
-today = dt.date.today().strftime("%Y%m%d")
-
-# Setup logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-if not logger.handlers:
-    ch = logging.StreamHandler()
-    ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    logger.addHandler(ch)
-
-# Constants
-ENDPOINT = "[https://openapi.koreainvestment.com](https://openapi.koreainvestment.com):9443"
-CACHE_DIR = os.path.expanduser("~/KRX_cache")
-Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
-
-
-
-
-
-
-
-def create_price_df(data_dict: Dict[str, pd.DataFrame], column: str = 'close') -> pd.DataFrame:
-    """
-    Convert dictionary of OHLCV DataFrames to a price DataFrame
-    
-    Args:
-        data_dict: Dictionary of DataFrames keyed by stock code
-        column: Column to extract (default: close)
-        
-    Returns:
-        DataFrame with prices by stock code
-    """
-    # Initialize empty DataFrame
-    price_data = pd.DataFrame()
-    
-    # Extract specified column from each DataFrame
-    for code, df in data_dict.items():
-        if column in df.columns and not df.empty:
-            price_data[code] = df[column]
-    
-    return price_data
-
-
-
-def load_sector_codes(path: str) -> list[str]:
-    """
-    Load stock codes from a CSV file defining your sector universe.
-    
-    Args:
-        path: Path to the CSV file containing sector universe
-        
-    Returns:
-        List of stock codes as strings
-    """
-    df = pd.read_csv(path)
-    # Assumes the CSV has a column named 'code'
-    return df['code'].astype(str).tolist()
-
-
-def get_latest_close(codes: list[str], as_of_date: str) -> pd.DataFrame:
-    """
-    Fetch the closing prices for each code on the given date from the KRX DB.
-    
-    Args:
-        codes: List of stock codes to fetch
-        as_of_date: Date in YYYY-MM-DD format
-        
-    Returns:
-        DataFrame with 'close' prices, indexed by stock code
-    """
-    conn = sqlite3.connect(str(KRX_DB_PATH))
-    placeholders = ",".join(["?"] * len(codes))
-    sql = f"""
-        SELECT code, close
-          FROM daily_prices
-         WHERE date = ?
-           AND code IN ({placeholders})
-    """
-    params = [as_of_date] + codes
-    df = pd.read_sql(sql, conn, params=params)
-    conn.close()
-    return df.set_index('code')[['close']]
-
-
-def create_price_df(data_dict: Dict[str, pd.DataFrame], column: str = 'close') -> pd.DataFrame:
-    """
-    Convert dictionary of OHLCV DataFrames to a price DataFrame
-    
-    Args:
-        data_dict: Dictionary of DataFrames keyed by stock code
-        column: Column to extract (default: close)
-        
-    Returns:
-        DataFrame with prices by stock code
-    """
-    # Initialize empty DataFrame
-    price_data = pd.DataFrame()
-    
-    # Extract specified column from each DataFrame
-    for code, df in data_dict.items():
-        if column in df.columns and not df.empty:
-            price_data[code] = df[column]
-    
-    return price_data
 
 __all__ = [
     "load_sector_codes",
