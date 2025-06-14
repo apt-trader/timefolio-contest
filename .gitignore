@@ -2,13 +2,22 @@
 venv/
 __pycache__/
 *.py[cod]
+
 # VS Code
 .vscode/
-# data folders
+
+# data folders and files
 cache/
 out/
 krx_data.db
+krx_data_macro.db
+krx_data_.db
 logs/
+
+# Environment variables
 .env
-.env
-.env
+
+# Data CSV files
+forbidden.csv
+market_sectors.csv
+sector_universe.csv

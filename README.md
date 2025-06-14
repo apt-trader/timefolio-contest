@@ -172,6 +172,11 @@ data_fetch:
   - Updates `macro_data` table
   - Implements data quality checks
 
+**Technical Improvements**:
+  - All fetcher modules now reuse a persistent SQLite connection (`self.conn`) to minimize overhead.
+  - Logging and exception handling standardized using `logger.exception` and structured log messages.
+  - Unified CLI arguments across all scripts (`-s/--start-date`, `-e/--end-date`) with built-in date parsing.
+
 ### II. Data Manager
 - **Module**: `data_manager.py`
 - **Key Functions**:
@@ -236,20 +241,32 @@ data_fetch:
 
 ### 1. Update Market Data (Run at the start of each week)
    ```bash
-   # Backfill any missing market data (only needed if there were holidays/errors)
-   python backfill_krx_data.py --start-date $(date -v-7d "+%Y%m%d") --end-date $(date "+%Y%m%d")
-   
    # Fetch fresh market data (past 30 days)
-   python krx_fetcher.py -s $(date -v-30d "+%Y%m%d") -e $(date "+%Y%m%d")
-   
-   # Update financial statements (past year)
-   python financial_fetcher.py -s $(date -v-1y "+%Y%m%d") -e $(date "+%Y%m%d")
-   
-   # Update macroeconomic data (past year)
-   python macro_fetcher.py -s $(date -v-1y "+%Y%m%d") -e $(date "+%Y%m%d")
+   python krx_fetcher.py -s $(date -v-30d "+%Y%m%d") -e $(date "+%Y%m%d") --market ALL --update-db
    ```
 
-### 2. Generate Portfolio (After data updates)
+### 2. Fetch Financial Data
+   ```bash
+   # For entire universe (reads from config):
+   python financial_fetcher.py -a -s YYYYMMDD -e YYYYMMDD [--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}]
+
+   # For a single company by stock code or name:
+   python financial_fetcher.py -i 005930 -s 20220101 -e 20221231 --log-level DEBUG
+   ```
+   
+   **Options**:
+   - `-a, --all`: Fetch for all tickers in the universe
+   - `-i, --identifier`: Company stock code (e.g., '005930') or name (e.g., '삼성전자')
+   - `-s, --start-date`: Start date in YYYYMMDD format
+   - `-e, --end-date`: End date in YYYYMMDD format
+   - `--log-level`: Set logging level (default: INFO)
+
+### 3. Fetch Macro Data
+   ```bash
+   python macro_fetcher.py -s YYYY-MM-DD -e YYYY-MM-DD
+   ```
+
+### 4. Generate Portfolio (After data updates)
    ```bash
    python competition_portfolio.py \
      --config config.yaml \
@@ -257,18 +274,18 @@ data_fetch:
      --out-dir output/
    ```
 
-### 3. Monitor Risk (Run daily/continuously)
+### 5. Monitor Risk (Run daily/continuously)
   ```bash
    python risk_monitor.py --config config/risk_config.yaml
    ```
 
-### 4. Backtest Portfolio (Additional command)
+### 6. Backtest Portfolio (Additional command)
   
   ```bash
   python backtest_portfolio.py --start-date 20240101 --end-date 20241231
   ```
 
-### 5. Update Universe (Additional command)
+### 7. Update Universe (Additional command)
   
   ```bash
   python update_universe.py --market KOSPI --min-cap 100000000000  # 100B KRW

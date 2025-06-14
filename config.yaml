@@ -1,11 +1,12 @@
 # Data source files and folders
 data_settings:
-  stock_universe_file: "validated_universes/sector_universe_validated_20250522_134552.csv"
+  stock_universe_file: "sector_universe.csv"
   market_sectors_file: "market_sectors.csv"
   start_date: '2022-01-01'  # Extended to ensure sufficient historical data
   end_date: '2025-09-30'
   cache_dir: 'cache'
   output_dir: 'out'
+  krx_db_path: "krx_data.db"
 
 # Core optimization parameters
 optimization:
@@ -38,6 +39,9 @@ risk_management:
 data_fetch:
   max_attempts: 3
   retry_delay: 5                  # Seconds between retries
+  skip_if_exists: true
+  max_daily_calls: 10000
+  backoff_seconds_on_429: 3600
 
 # Logging
 logging:
@@ -47,4 +51,3 @@ logging:
 debug:
   log_optimization: true
   save_intermediate: true
-  log_level: DEBUG
