@@ -24,3 +24,9 @@ sector_universe.csv
 
 # Exclude backup directory
 backup/
+backup/krx_data_krx_fin.db
+
+# Cache and log directories
+docs_cache/
+krx_cache/
+logs/
