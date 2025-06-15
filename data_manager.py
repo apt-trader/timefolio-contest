@@ -1,147 +1,97 @@
-#!/usr/bin/env python3
-"""
-Data Manager for TimeFolio project
-Handles data loading and processing for KRX data
-"""
+# data_manager.py
 import logging
-import sqlite3
 import pandas as pd
-from pathlib import Path
-from typing import List, Dict
+from datetime import datetime
+import FinanceDataReader as fdr
+import sqlite3
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+from config import Config
+from fetchers.krx_fetcher import KRXFetcher
+from fetchers.financial_fetcher import FinancialsFetcher
+from fetchers.macro_fetcher import MacroFetcher
+from compliance_filters import ComplianceFilter
+
 logger = logging.getLogger(__name__)
 
-# Path to the SQLite DB where KRX OHLCV + factors are stored
-KRX_DB_PATH = Path(__file__).parent / "krx_data.db"
+class DataManager:
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.db_path = cfg.db_path
+        self._krx = KRXFetcher(db_path=self.db_path)
+        self._fin = FinancialsFetcher(api_key=cfg.fetcher_settings.get('dart_api_key'), db_path=self.db_path)
+        self._macro = MacroFetcher(fred_api_key=cfg.fetcher_settings.get('fred_api_key'))
+        self.tickers, self.sector_map = self._initialize_universe()
+        logger.info(f"DataManager initialized with {len(self.tickers)} compliant tickers.")
 
-def load_sector_codes(path: str) -> List[str]:
-    """
-    Load stock codes from a CSV file defining your sector universe.
-    
-    Args:
-        path: Path to the CSV file containing sector universe
-        
-    Returns:
-        List of stock codes as strings
-    """
-    try:
-        df = pd.read_csv(path)
-        if 'code' in df.columns:
-            return df['code'].astype(str).str.zfill(6).tolist()
-        elif '종목코드' in df.columns:
-            return df['종목코드'].astype(str).str.strip().str.zfill(6).tolist()
-        else:
-            logger.error(f"CSV file must contain 'code' or '종목코드' column: {path}")
-            return []
-    except Exception as e:
-        logger.error(f"Error loading sector codes from {path}: {e}")
-        return []
+    def _initialize_universe(self) -> tuple[list[str], dict[str, str]]:
+        # ... (This logic is correct and remains the same) ...
+        # It correctly uses ComplianceFilter to produce a clean universe
+        return self._run_compliance_filters()
 
-def get_latest_close(codes: list[str], as_of_date: str) -> pd.DataFrame:
-    """
-    Fetch the closing prices for each code on the given date from the KRX DB.
-    
-    Args:
-        codes: List of stock codes to fetch
-        as_of_date: Date in YYYY-MM-DD format
-        
-    Returns:
-        DataFrame with 'close' prices, indexed by stock code
-    """
-    if not codes:
-        return pd.DataFrame()
-        
-    try:
-        with sqlite3.connect(KRX_DB_PATH) as conn:
-            placeholders = ','.join(['?'] * len(codes))
-            query = f"""
-                SELECT code, close 
-                FROM daily_prices 
-                WHERE code IN ({placeholders})
-                AND date = (
-                    SELECT MAX(date) 
-                    FROM daily_prices 
-                    WHERE date <= ? AND code IN ({placeholders})
-                )
-            """
-            params = codes + [as_of_date] + codes
-            df = pd.read_sql_query(query, conn, params=params)
-            return df.set_index('code') if not df.empty else pd.DataFrame()
-    except Exception as e:
-        logger.error(f"Error fetching latest close prices: {e}")
-        return pd.DataFrame()
+    def _run_compliance_filters(self) -> tuple[list[str], dict[str, str]]:
+        raw_universe_df = pd.read_csv(self.cfg.stock_universe_file, dtype=str)
+        raw_universe_df['종목코드'] = raw_universe_df['종목코드'].str.strip().str.lstrip('A').str.zfill(6)
+        raw_universe_df = raw_universe_df.set_index('종목코드')
+        initial_tickers = raw_universe_df.index.tolist()
+        initial_sector_map = raw_universe_df['섹터코드'].to_dict()
+        logger.info(f"Loaded {len(initial_tickers)} tickers from universe file.")
 
-def create_price_df(data_dict: Dict[str, pd.DataFrame], column: str = 'close') -> pd.DataFrame:
-    """
-    Convert dictionary of OHLCV DataFrames to a price DataFrame
-    
-    Args:
-        data_dict: Dictionary of DataFrames keyed by stock code
-        column: Column to extract (default: close)
+        logger.info("Fetching data required for compliance filters...")
+        listings_info = fdr.StockListing('KRX-ALL').set_index('Code')
         
-    Returns:
-        DataFrame with prices by stock code
-    """
-    if not data_dict:
-        return pd.DataFrame()
+        start_date_str = (datetime.strptime(self.cfg.end_date, '%Y-%m-%d') - pd.DateOffset(days=60)).strftime('%Y-%m-%d')
+        prices_df = self.get_all_prices_for_tickers(initial_tickers, start_date_str, self.cfg.end_date)
+        volumes_df = self.get_all_volumes_for_tickers(initial_tickers, start_date_str, self.cfg.end_date)
         
-    try:
-        # Extract the specified column from each DataFrame
-        price_series = []
-        for code, df in data_dict.items():
-            if not df.empty and column in df.columns:
-                price_series.append(df[column].rename(code))
+        comp_filter = ComplianceFilter(
+            min_avg_daily_value=self.cfg.risk_management.get('min_avg_daily_value', 3_000_000_000),
+            min_ipo_days=self.cfg.risk_management.get('min_ipo_days', 90)
+        )
+        filter_results = comp_filter.apply_all_filters(prices_df, volumes_df, listings_info)
+        comp_filter.save_forbidden_list(filter_results)
         
-        return pd.concat(price_series, axis=1) if price_series else pd.DataFrame()
-    except Exception as e:
-        logger.error(f"Error creating price DataFrame: {e}")
-        return pd.DataFrame()
+        forbidden_tickers = filter_results['all']
+        compliant_tickers = [t for t in initial_tickers if t not in forbidden_tickers]
+        compliant_sector_map = {t: s for t, s in initial_sector_map.items() if t in compliant_tickers}
+        
+        logger.info(f"Compliance filtering complete. Final universe size: {len(compliant_tickers)}.")
+        return compliant_tickers, compliant_sector_map
 
-__all__ = [
-    "load_sector_codes",
-    "get_latest_close",
-    "create_price_df",
-    "KRX_DB_PATH"
-]
+    def get_market_data(self) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+        logger.info(f"Fetching market data for {len(self.tickers)} tickers...")
+        prices_df = self.get_all_prices_for_tickers(self.tickers, self.cfg.start_date, self.cfg.end_date)
+        volumes_df = self.get_all_volumes_for_tickers(self.tickers, self.cfg.start_date, self.cfg.end_date)
+        market_caps_df = self.get_all_market_caps_for_tickers(self.tickers, self.cfg.start_date, self.cfg.end_date)
+        
+        returns_df = prices_df.pct_change().dropna(how='all')
+        market_index = self._krx.get_stock_data('KOSPI', self.cfg.start_date.replace('-', ''), self.cfg.end_date.replace('-', ''))['close']
+        
+        common_index = returns_df.index
+        return prices_df.loc[common_index], volumes_df.loc[common_index], returns_df.loc[common_index], market_index.loc[common_index], market_caps_df.iloc[-1]
+    
+    # Helper methods for fetching data for a list of tickers
+    def get_all_prices_for_tickers(self, tickers, start, end):
+        return pd.DataFrame({t: self._krx.get_stock_data(t, start.replace('-', ''), end.replace('-', ''))['close'] for t in tickers}).ffill().bfill()
+    
+    def get_all_volumes_for_tickers(self, tickers, start, end):
+        return pd.DataFrame({t: self._krx.get_stock_data(t, start.replace('-', ''), end.replace('-', ''))['volume'] for t in tickers}).ffill().bfill()
+        
+    def get_all_market_caps_for_tickers(self, tickers, start, end):
+        return pd.DataFrame({t: self._krx.get_stock_data(t, start.replace('-', ''), end.replace('-', ''))['market_cap'] for t in tickers}).ffill().bfill()
 
-if __name__ == "__main__":
-    # Setup console logging when run directly
-    logging.basicConfig(level=logging.INFO)
-    
-    # Simple CLI interface
-    import argparse
-    parser = argparse.ArgumentParser(description="KRX Data Manager")
-    parser.add_argument("--check-cache", action="store_true", help="Check cache status")
-    parser.add_argument("--sample", type=str, help="Fetch sample data for a specific code")
-    parser.add_argument("--start-date", type=str, default="20230101", help="Start date (YYYYMMDD)")
-    
-    args = parser.parse_args()
-    
-    if args.check_cache:
-        stats = check_cache_status()
-        print("Cache Status:")
-        for k, v in stats.items():
-            if k != "samples":
-                print(f"  {k}: {v}")
-        if "samples" in stats:
-            print("\nSample Files:")
-            for s in stats["samples"]:
-                print(f"  {s['file']}: {s['rows']} rows, {s['earliest']} to {s['latest']}")
-    
-    if args.sample:
-        try:
-            code = args.sample
-            print(f"Fetching sample data for {code} from {args.start_date}")
-            df = get_stock_data(code, args.start_date)
-            print(f"Retrieved {len(df)} rows of data")
-            if not df.empty:
-                print(f"Date range: {df.index.min().date()} to {df.index.max().date()}")
-                print("\nSample data:")
-                print(df.head())
-        except Exception as e:
-            print(f"Error: {e}")
+    def get_fundamental_data(self) -> pd.DataFrame:
+        """Provides the latest fundamental data for the compliant universe."""
+        logger.info(f"Fetching latest fundamental data for {len(self.tickers)} tickers.")
+        return self._fin.get_latest_fundamentals(self.tickers, self.cfg.end_date)
+
+    def get_macro_data(self) -> pd.DataFrame:
+        """Provides the latest macroeconomic data."""
+        logger.info("Fetching latest macroeconomic data.")
+        self._macro.fetch_and_store(self.cfg.end_date)
+        with sqlite3.connect(self.db_path) as conn:
+            query = "SELECT * FROM macro_data WHERE date <= ? ORDER BY date DESC LIMIT 1"
+            df = pd.read_sql(query, conn, params=[self.cfg.end_date])
+        return df
+        
+    def get_sector_mappings(self) -> dict[str, str]:
+        return self.sector_map

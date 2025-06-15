@@ -1,334 +1,139 @@
-"""Enhanced factor engine for Korean equity portfolio optimization."""
+# factor_engine.py
+import logging
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple
-from scipy.stats import zscore
-import logging
+from typing import Dict, List
+from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
-from sklearn.pipeline import Pipeline
+import xgboost as xgb
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class FactorEngine:
-    def __init__(self, 
-                 mom_windows: List[int] = [20, 60, 120],
-                 vol_window: int = 20,
-                 rsi_window: int = 14,
-                 min_volume: float = 3e9,  # 3B KRW minimum daily volume
-                 volume_window: int = 5):
-        """
-        Initialize the factor engine.
-        
-        Args:
-            mom_windows: Lookback periods for momentum factors (in days)
-            vol_window: Window for volatility calculation (in days)
-            rsi_window: Window for RSI calculation (in days)
-            min_volume: Minimum average daily volume (KRW)
-            volume_window: Window for volume averaging (in days)
-        """
-        self.mom_windows = mom_windows
-        self.vol_window = vol_window
-        self.rsi_window = rsi_window
-        self.min_volume = min_volume
-        self.volume_window = volume_window
+    def __init__(self, settings: Dict):
+        self.settings = settings
+        self.mom_windows = settings.get('mom_windows', [20, 60, 120])
+        self.vol_window = settings.get('vol_window', 20)
+        self.rsi_window = settings.get('rsi_window', 14)
+        self.prediction_model = settings.get('prediction_model', 'pcr') # 'pcr' or 'xgb'
+        logger.info(f"FactorEngine initialized. Prediction model: {self.prediction_model.upper()}")
 
-    def calculate_factors(self, 
-                        prices: pd.DataFrame, 
-                        volumes: pd.DataFrame,
-                        market_index: pd.Series) -> Dict[str, pd.DataFrame]:
-        """
-        Calculate all factors.
-        
-        Args:
-            prices: DataFrame with price data (tickers as columns, datetime index)
-            volumes: DataFrame with volume data (same structure as prices)
-            market_index: Series of market index prices (aligned with prices.index)
+    def _cross_sectional_rank(self, series: pd.Series) -> pd.Series:
+        """Ranks data cross-sectionally and scales it from -1 to 1."""
+        return series.rank(pct=True).sub(0.5).mul(2).fillna(0)
 
-        Returns:
-            Dictionary of factor DataFrames
-        """
-        logger.info("Calculating factors...")
+    def calculate_all_factors(self,
+                              prices: pd.DataFrame,
+                              volumes: pd.DataFrame,
+                              market_index: pd.Series,
+                              fundamental_data: pd.DataFrame,
+                              market_caps: pd.Series,
+                              macro_data: pd.DataFrame) -> pd.DataFrame:
+        """Main entry point to calculate and combine all factors."""
+        logger.info("Starting calculation of all factor types.")
         returns = prices.pct_change()
         
-        # 1. Calculate individual factors
-        vol_adj_momentum = self._calculate_vol_adj_momentum(prices, returns)
-        mean_reversion = self._calculate_mean_reversion(prices, returns)
-        liquidity = self._calculate_liquidity(volumes)
-
-        # Additional factors
-        beta = self._calculate_beta(prices, market_index)
-        turnover = self._calculate_turnover(volumes)
-        breakout = self._calculate_breakout(prices)
-        volume_momentum = self._calculate_volume_momentum(volumes)
-        
-        # 2. Combine factors
+        # Calculate each factor. Note: they are now single Series representing the latest signal.
         factors = {
-            'momentum': vol_adj_momentum,
-            'mean_reversion': mean_reversion,
-            'liquidity': liquidity,
-            'beta': beta,
-            'turnover': turnover,
-            'breakout': breakout,
-            'volume_momentum': volume_momentum
+            'Momentum': self._calculate_vol_adj_momentum(prices, returns),
+            'Reversion': self._calculate_mean_reversion(prices),
+            'Liquidity': self._calculate_liquidity(prices, volumes),
+            'Low_Beta': self._calculate_beta(returns, market_index),
+            'Value': self._calculate_value_factors(fundamental_data, market_caps),
+            'Quality': self._calculate_quality_factors(fundamental_data),
+            'Profitability': self._calculate_profitability_factors(fundamental_data),
+            'Macro_Regime': self._calculate_macro_regime_factor(macro_data)
         }
+
+        # Combine all factor series into a single DataFrame
+        combined_factors = pd.DataFrame(factors).dropna(axis=1, how='all')
         
-        # 3. Create composite score (equal-weighted for now)
-        composite = sum(factor for factor in factors.values()) / len(factors)
-        factors['composite'] = composite
+        # The Macro_Regime is a single value, broadcast it to all tickers
+        if 'Macro_Regime' in combined_factors.columns:
+            macro_signal = combined_factors['Macro_Regime'].iloc[0]
+            combined_factors['Macro_Regime'] = macro_signal
         
-        return factors
-    
-    def _calculate_vol_adj_momentum(self, 
-                                   prices: pd.DataFrame, 
-                                   returns: pd.DataFrame) -> pd.DataFrame:
-        """Calculate volatility-adjusted momentum factors."""
-        logger.debug("Calculating volatility-adjusted momentum...")
-        vol = returns.rolling(self.vol_window).std() * np.sqrt(252)  # Annualized vol
-        
-        momentum_factors = []
-        for window in self.mom_windows:
-            # Simple momentum
-            mom = prices.pct_change(window)
-            
-            # Volatility adjustment (avoid division by zero)
-            vol_adj = vol.mask(vol < 1e-6, np.nan)
-            vol_adj_mom = mom / (vol_adj + 1e-6)
-            
-            # Z-score normalization
-            z_mom = vol_adj_mom.apply(zscore)
-            momentum_factors.append(z_mom)
-        
-        # Average across different lookback periods
-        if momentum_factors:
-            avg_momentum = sum(momentum_factors) / len(momentum_factors)
-            return avg_momentum
-        return pd.DataFrame(0, index=prices.index, columns=prices.columns)
-    
-    def _calculate_mean_reversion(self, 
-                                prices: pd.DataFrame, 
-                                returns: pd.DataFrame) -> pd.DataFrame:
-        """Calculate mean reversion factors."""
-        logger.debug("Calculating mean reversion factors...")
-        
-        # 1. RSI (Relative Strength Index)
-        delta = returns.diff()
+        logger.info(f"Factor calculation complete. {len(combined_factors.columns)} factors calculated for {len(combined_factors)} tickers.")
+        return combined_factors.fillna(0)
+
+    # --- Technical Factor Methods (return latest signal as Series) ---
+    def _calculate_vol_adj_momentum(self, prices, returns):
+        vol = returns.rolling(self.vol_window).std()
+        mom = prices.pct_change(self.mom_windows[-1]) # Use longest window for signal
+        adj_mom = mom.iloc[-1] / (vol.iloc[-1] + 1e-6)
+        return self._cross_sectional_rank(adj_mom)
+
+    def _calculate_mean_reversion(self, prices):
+        delta = prices.diff()
         gain = delta.where(delta > 0, 0).rolling(self.rsi_window).mean()
         loss = -delta.where(delta < 0, 0).rolling(self.rsi_window).mean()
-        rs = gain / (loss + 1e-6)
+        rs = gain.iloc[-1] / (loss.iloc[-1] + 1e-6)
         rsi = 100 - (100 / (1 + rs))
-        
-        # 2. Bollinger Bands %B
-        rolling_mean = prices.rolling(20).mean()
-        rolling_std = prices.rolling(20).std()
-        bollinger_pct = (prices - rolling_mean) / (2 * rolling_std + 1e-6)
-        
-        # Combine signals (equal weight)
-        mean_rev = (rsi.rank(axis=1, pct=True) + bollinger_pct.rank(axis=1, pct=True)) / 2
-        return mean_rev
-    
-    def _calculate_liquidity(self, volumes: pd.DataFrame) -> pd.DataFrame:
-        """Calculate liquidity factors."""
-        logger.debug("Calculating liquidity factors...")
-        
-        # 1. Volume-based liquidity
-        avg_volume = volumes.rolling(self.volume_window).mean()
-        volume_liquidity = avg_volume.apply(lambda x: x / self.min_volume).clip(upper=1.0)
-        
-        # 2. Volume trend (increasing volume is better)
-        volume_trend = volumes.pct_change(self.volume_window).clip(lower=-1.0, upper=1.0)
-        
-        # Combine liquidity factors
-        liquidity = (volume_liquidity * 0.7 + (volume_trend + 1) * 0.15)  # 70% level, 15% trend
-        
-        return liquidity
+        return self._cross_sectional_rank(-rsi) # Lower RSI is better
 
-    def _calculate_beta(self, 
-                        prices: pd.DataFrame, 
-                        market_index: pd.Series, 
-                        window: int = 120) -> pd.DataFrame:
-        """Calculate rolling beta vs. market index."""
-        rets = prices.pct_change()
-        mkt_ret = market_index.pct_change()
-        betas = {}
-        for ticker in prices.columns:
-            cov = rets[ticker].rolling(window).cov(mkt_ret)
-            var = mkt_ret.rolling(window).var()
-            betas[ticker] = cov / (var + 1e-8)
-        return pd.DataFrame(betas, index=prices.index)
-
-    def _calculate_turnover(self, 
-                            volumes: pd.DataFrame, 
-                            window: int = 5) -> pd.DataFrame:
-        """Calculate volume turnover over a lookback window."""
-        avg_vol = volumes.rolling(window).mean()
-        return avg_vol.pct_change().fillna(0)
-
-    def _calculate_breakout(self, 
-                            prices: pd.DataFrame, 
-                            window: int = 252) -> pd.DataFrame:
-        """Calculate 52-week high breakout."""
-        rolling_max = prices.rolling(window).max()
-        return (prices / (rolling_max + 1e-8)) - 1
-
-    def _calculate_volume_momentum(self, 
-                                   volumes: pd.DataFrame, 
-                                   window: int = 20) -> pd.DataFrame:
-        """Calculate volume momentum as pct change over lookback."""
-        return volumes.pct_change(window).fillna(0)
-    
-    def filter_universe(self, 
-                       factors: Dict[str, pd.DataFrame], 
-                       prices: pd.DataFrame,
-                       min_liquidity: float = 0.5) -> pd.DataFrame:
-        """
-        Filter universe based on liquidity and other criteria.
+    def _calculate_liquidity(self, prices, volumes):
+        avg_daily_value = (prices * volumes).rolling(20).mean()
+        return self._cross_sectional_rank(avg_daily_value.iloc[-1])
         
-        Args:
-            factors: Dictionary of factor DataFrames
-            prices: Price data
-            min_liquidity: Minimum liquidity score (0-1)
+    def _calculate_beta(self, returns, market_index):
+        market_returns = market_index.pct_change()
+        rolling_cov = returns.rolling(60).cov(market_returns)
+        beta = rolling_cov / (market_returns.rolling(60).var() + 1e-6)
+        return self._cross_sectional_rank(-beta.iloc[-1]) # Lower beta is better
+
+    # --- Fundamental Factor Methods ---
+    def _calculate_value_factors(self, fundamental_data, market_caps):
+        if fundamental_data.empty: return pd.Series()
+        data = fundamental_data.join(market_caps.rename('MarketCap'), how='inner')
+        data['BPR'] = data['Equity'] / data['MarketCap']
+        data['EPR'] = data['NetIncome'] / data['MarketCap']
+        return self._cross_sectional_rank(data['BPR']) + self._cross_sectional_rank(data['EPR'])
+
+    def _calculate_quality_factors(self, fundamental_data):
+        if fundamental_data.empty: return pd.Series()
+        data = fundamental_data.copy()
+        data['ROE'] = data['NetIncome'] / data['Equity']
+        data['Leverage'] = data['Liabilities'] / data['Assets']
+        return self._cross_sectional_rank(data['ROE']) + self._cross_sectional_rank(-data['Leverage'])
+
+    def _calculate_profitability_factors(self, fundamental_data):
+        if fundamental_data.empty: return pd.Series()
+        data = fundamental_data.copy()
+        data['GrossProfitability'] = data['GrossProfit'] / data['Assets']
+        return self._cross_sectional_rank(data['GrossProfitability'])
+        
+    def _calculate_macro_regime_factor(self, macro_data):
+        if macro_data.empty: return pd.Series({'Macro_Regime': 0})
+        yield_spread = macro_data['us10y2y'].iloc[0]
+        macro_signal = 1 if yield_spread > 0.001 else -1 # Risk-on vs Risk-off
+        logger.info(f"Macro Regime (10y-2y spread: {yield_spread:.3f}): {'Risk-On' if macro_signal > 0 else 'Risk-Off'}")
+        return pd.Series({'Macro_Regime': macro_signal})
+
+    # --- Prediction Model ---
+    def predict_returns(self, factors: pd.DataFrame) -> pd.Series:
+        """Combines all factors into a final alpha signal."""
+        # Simple equal-weighted combination for now. Can be replaced with a model.
+        logger.info("Combining factors into a final alpha signal.")
+        # We interact the macro regime with other factors
+        if 'Macro_Regime' in factors.columns:
+            macro_signal = factors['Macro_Regime'].iloc[0]
+            # In risk-off, we might favor Quality and Low_Beta more
+            risk_off_weights = {'Value': 0.2, 'Quality': 0.4, 'Low_Beta': 0.4, 'Momentum': 0.0, 'Reversion': 0.0}
+            risk_on_weights = {'Value': 0.2, 'Quality': 0.2, 'Low_Beta': 0.0, 'Momentum': 0.4, 'Reversion': 0.2}
             
-        Returns:
-            Boolean mask of valid securities
-        """
-        liquidity_mask = factors['liquidity'] >= min_liquidity
-        price_mask = prices > 1000  # Minimum price filter (1000 KRW)
-        
-        # Combine masks
-        valid_mask = liquidity_mask & price_mask
-        return valid_mask
-
-    def find_optimal_components(self,
-                              factors: Dict[str, pd.DataFrame],
-                              returns: pd.Series,
-                              max_components: int = None,
-                              n_splits: int = 5) -> Tuple[int, float]:
-        """
-        Find the optimal number of principal components using time-series cross-validation.
-        
-        Args:
-            factors: dict of factor DataFrames
-            returns: Series of realized returns
-            max_components: maximum number of components to consider
-            n_splits: number of time-series cross-validation splits
+            weights = risk_off_weights if macro_signal < 0 else risk_on_weights
             
-        Returns:
-            Tuple of (best_n_components, best_mse)
-        """
-        # Prepare factor matrix X and return vector y
-        factor_df = pd.concat([factors['momentum'],
-                              factors['mean_reversion'],
-                              factors['liquidity'],
-                              factors['composite']], 
-                             axis=1, 
-                             keys=['momentum', 'mean_reversion', 'liquidity', 'composite'])
-        
-        # Flatten multiindex columns to single level
-        X = factor_df.stack(level=0).dropna()
-        y = returns.loc[X.index]
-        
-        if max_components is None:
-            max_components = min(X.shape[1], 10)  # Default to min(10, n_features)
-        
-        # Create pipeline with standardization, PCA, and linear regression
-        pipe = Pipeline([
-            ('scaler', StandardScaler()),
-            ('pca', PCA()),
-            ('lr', LinearRegression())
-        ])
-        
-        # Parameter grid for number of components
-        param_grid = {
-            'pca__n_components': list(range(1, max_components + 1))
-        }
-        
-        # Time-series cross-validation
-        tscv = TimeSeriesSplit(n_splits=n_splits)
-        
-        # Grid search with time-series CV
-        grid = GridSearchCV(
-            pipe,
-            param_grid,
-            scoring='neg_mean_squared_error',
-            cv=tscv,
-            n_jobs=-1
-        )
-        
-        # Fit the model
-        grid.fit(X, y)
-        
-        # Get best parameters and score
-        best_m = grid.best_params_['pca__n_components']
-        best_mse = -grid.best_score_
-        
-        logger.info(f"Optimal number of components: {best_m} (MSE: {best_mse:.6f})")
-        return best_m, best_mse
-
-    def pca_predict(self,
-                   factors: Dict[str, pd.DataFrame],
-                   returns: pd.Series,
-                   n_components: int = None,
-                   use_cv: bool = True) -> pd.Series:
-        """
-        Perform Principal Component Regression (PCR) to predict next-period returns.
-        
-        Args:
-            factors: dict of factor DataFrames
-            returns: Series of realized returns
-            n_components: number of principal components to use (if None, use CV to find optimal)
-            use_cv: whether to use cross-validation to find optimal components
+            # Drop profitability if it's not adding value, or give it a weight
+            factor_cols = [col for col in ['Momentum', 'Reversion', 'Low_Beta', 'Value', 'Quality'] if col in factors.columns]
             
-        Returns:
-            Series of predicted returns for each ticker
-        """
-        # Prepare factor matrix X and return vector y
-        factor_df = pd.concat([factors['momentum'],
-                              factors['mean_reversion'],
-                              factors['liquidity'],
-                              factors['composite']], 
-                             axis=1, 
-                             keys=['momentum', 'mean_reversion', 'liquidity', 'composite'])
-        
-        # Flatten multiindex columns to single level
-        X = factor_df.stack(level=0).dropna()
-        y = returns.loc[X.index]
-        
-        # Find optimal number of components if not specified
-        if n_components is None or use_cv:
-            n_components, _ = self.find_optimal_components(factors, returns)
-        
-        # Standardize features
-        self.scaler = StandardScaler()
-        X_std = self.scaler.fit_transform(X)
-        
-        # Fit PCA
-        self.pca = PCA(n_components=n_components)
-        Z = self.pca.fit_transform(X_std)
-        
-        # Fit linear regression
-        self.lr = LinearRegression()
-        self.lr.fit(Z, y)
-        
-        # Prepare latest factor data for prediction
-        latest_factors = pd.concat([factors['momentum'].iloc[-1],
-                                   factors['mean_reversion'].iloc[-1],
-                                   factors['liquidity'].iloc[-1],
-                                   factors['composite'].iloc[-1]], 
-                                  axis=1, 
-                                  keys=['momentum', 'mean_reversion', 'liquidity', 'composite'])
-        
-        # Standardize and transform latest data
-        X_latest = latest_factors.stack().unstack(level=1)
-        X_latest_std = self.scaler.transform(X_latest)
-        Z_latest = self.pca.transform(X_latest_std)
-        
-        # Make predictions
-        pred = self.lr.predict(Z_latest)
-        
-        return pd.Series(pred, index=latest_factors.index)
+            # Apply weights
+            weighted_factors = pd.Series(0.0, index=factors.index)
+            for factor, weight in weights.items():
+                if factor in factor_cols and weight > 0:
+                    weighted_factors += factors[factor] * weight
+            
+            return weighted_factors
+            
+        else: # Fallback if no macro data
+            return factors.mean(axis=1)

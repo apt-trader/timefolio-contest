@@ -18,7 +18,7 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 # Load sector universe file from config
-config_path = Path(__file__).parent / "config" / "config.yaml"
+config_path = Path(__file__).parent / "config.yaml"
 with open(config_path) as f:
     cfg = yaml.safe_load(f)
 universe_file = cfg['data_settings']['stock_universe_file']

@@ -11,7 +11,7 @@ import sqlite3
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Union
 from io import BytesIO
 import pandas as pd
 import requests
@@ -100,52 +100,19 @@ class KRXDataFetcher:
     def _init_database(self):
         """Initialize the SQLite database with required tables."""
         with self.conn:
-            conn = self.conn
-            # Create daily price table with additional factor columns
-            conn.execute("""
+            self.conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_prices (
-                code TEXT,
-                date DATE,
-                open REAL,
-                high REAL,
-                low REAL,
-                close REAL,
-                volume INTEGER,
-                value INTEGER,
-                market TEXT,
-                name TEXT,
-                momentum_1m REAL,
-                momentum_6_12m REAL,
-                momentum_12m REAL,
-                vol_20d REAL,
-                beta REAL,
-                turnover_ratio REAL,
-                breakout_52w_high REAL,
-                breakout_52w_low REAL,
-                volume_momentum REAL,
+                code TEXT, date DATE,
+                open REAL, high REAL, low REAL, close REAL,
+                volume INTEGER, value INTEGER, market_cap REAL, -- ADDED market_cap
+                market TEXT, name TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (code, date)
             )
             """)
-            
-            # Create index for faster lookups
-            conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_daily_prices_code 
-            ON daily_prices (code)
-            """)
-            conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_daily_prices_date 
-            ON daily_prices (date)
-            """)
-            
-            # Create metadata table for tracking
-            conn.execute("""
-            CREATE TABLE IF NOT EXISTS metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """)
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_prices_code ON daily_prices (code)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices (date)")
+            self.conn.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
     
     def _get_otp(self, mkt: str, date: str) -> str:
         """
@@ -247,7 +214,7 @@ class KRXDataFetcher:
             df = df.rename(columns={k: v for k, v in column_map.items() if k in df.columns})
             
             # Convert numeric columns
-            numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'value', 'market_cap', 'listed_shares']
+            numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'value', 'market_cap', 'listed_shares', 'foreign_holdings', 'foreign_limit', 'foreign_limit_ratio', 'par_value', 'per', 'roe', 'change_rate']
             for col in numeric_cols:
                 if col in df.columns:
                     df[col] = pd.to_numeric(
@@ -405,66 +372,37 @@ class KRXDataFetcher:
         return pd.concat(all_data, ignore_index=True)
     
     def update_database(self, df: pd.DataFrame) -> int:
-        """
-        Update the SQLite database with new data.
-        
-        Args:
-            df: DataFrame with market data
-            
-        Returns:
-            int: Number of rows inserted/updated
-        """
+        """Update the SQLite database with new data, including market_cap."""
         if df.empty:
             return 0
             
-        required_columns = ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'market']
+        # Add market_cap to the list of required columns
+        required_columns = ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'market_cap']
         missing_cols = [col for col in required_columns if col not in df.columns]
         if missing_cols:
-            raise ValueError(f"Missing required columns: {missing_cols}")
+            raise ValueError(f"DataFrame is missing required columns for DB update: {missing_cols}")
         
-        # Ensure date is in the correct format
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         
-        # Select and order columns for database, including new factor columns
-        db_columns = [
-            'code', 'date', 'open', 'high', 'low', 'close', 'volume', 'value', 'market', 'name',
-            'momentum_1m', 'momentum_6_12m', 'momentum_12m', 'vol_20d', 'beta',
-            'turnover_ratio', 'breakout_52w_high', 'breakout_52w_low', 'volume_momentum'
-        ]
-        # Only include columns present in df
-        db_columns_in_df = [col for col in db_columns if col in df.columns]
-        df = df.reindex(columns=db_columns_in_df)
+        # Define all columns to be saved
+        db_columns = ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'value', 'market_cap', 'name', 'market']
+        df_to_save = df.reindex(columns=db_columns) # Ensure all columns are present, filling missing with NaN
         
         with self.conn:
             cursor = self.conn.cursor()
             cursor.execute("BEGIN TRANSACTION")
-            
             try:
-                # Use INSERT OR REPLACE to handle duplicates
-                placeholders = ', '.join(['?'] * len(df.columns))
-                columns = ', '.join(df.columns)
-                update_columns = ', '.join([f"{col}=excluded.{col}" for col in df.columns if col not in ('code', 'date')])
+                placeholders = ', '.join(['?'] * len(df_to_save.columns))
+                columns_str = ', '.join(f'"{col}"' for col in df_to_save.columns)
+                update_clause = ', '.join([f'"{col}"=excluded."{col}"' for col in df_to_save.columns if col not in ('code', 'date')])
                 
-                sql = f"""
-                INSERT INTO daily_prices ({columns})
-                VALUES ({placeholders})
-                ON CONFLICT(code, date) DO UPDATE SET {update_columns}
-                """
+                sql = f"INSERT INTO daily_prices ({columns_str}) VALUES ({placeholders}) ON CONFLICT(code, date) DO UPDATE SET {update_clause}"
                 
-                cursor.executemany(sql, df.values.tolist())
+                cursor.executemany(sql, df_to_save.to_records(index=False).tolist())
                 count = cursor.rowcount
-                
-                # Update metadata
-                cursor.execute("""
-                INSERT INTO metadata (key, value) 
-                VALUES ('last_updated', ?)
-                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP
-                """, (datetime.now().isoformat(),))
-                
                 cursor.execute("COMMIT")
-                logger.info(f"Updated {count} rows in database")
+                logger.debug(f"Updated {count} rows in database for date {df['date'].iloc[0]}")
                 return count
-                
             except Exception as e:
                 cursor.execute("ROLLBACK")
                 logger.error(f"Error updating database: {e}")
@@ -531,7 +469,7 @@ class KRXDataFetcher:
                 )
             
             # Ensure we have the expected columns
-            expected_columns = ['code', 'name', 'open', 'high', 'low', 'close', 'volume', 'value', 'market']
+            expected_columns = ['code', 'name', 'open', 'high', 'low', 'close', 'volume', 'value', 'market_cap', 'name', 'market']
             for col in expected_columns:
                 if col not in df.columns:
                     df[col] = None
