@@ -102,13 +102,13 @@ Run these scripts to download the latest data into your local `krx_data.db`. Use
 
 ```bash
 # Fetch historical market data from KRX
-python -m fetchers.krx_fetcher -s 20220101 -e 20221231 --update-db
+python -m fetchers.krx_fetcher -s 20200101 -e 20201231 --update-db
 
 # Fetch annual financial statements from DART for all universe stocks
-python -m fetchers.financial_fetcher --all -s 20220101 -e 20221231
+python -m fetchers.financial_fetcher --all -s 20200101 -e 20201231
 
 # Fetch historical macroeconomic data from FRED and yfinance
-python -m fetchers.macro_fetcher -s 2022-01-01 -e 2022-12-31
+python -m fetchers.macro_fetcher -s 2020-01-01 -e 2020-12-31
 ```
 
 ### Step 2: Find Optimal Parameters (Research Phase)

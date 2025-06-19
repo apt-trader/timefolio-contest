@@ -8,7 +8,7 @@ data_settings:
   db_path: "krx_data.db"
   
   # Global date range for backtesting and analysis
-  start_date: '2022-01-01'
+  start_date: '2020-01-01'
   end_date: '2025-06-30'
 
 # --- Portfolio Optimization Parameters ---
