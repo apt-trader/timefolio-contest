@@ -1,7 +1,7 @@
 # TimeFolio Portfolio System
 
 A modular, professional-grade system for building, backtesting, and optimizing compliant Korean equity portfolios. It features a complete, end-to-end quantitative workflow, from data ingestion and multi-factor alpha modeling to hyperparameter tuning and risk analysis.
----
+
 ## Table of Contents
 
 1.  [Key Features](#key-features)
@@ -11,20 +11,21 @@ A modular, professional-grade system for building, backtesting, and optimizing c
 5.  [Installation](#installation)
 6.  [Configuration](#configuration)
 7.  [CLI Usage](#cli-usage)
-8.  [Outputs](#outputs)
-9.  [License & Acknowledgements](#license--acknowledgements)
+8.  [Technical Framework](#technical-framework)
+9.  [Outputs](#outputs)
+10. [License & Acknowledgements](#license--acknowledgements)
 ---
 ## Key Features
 
-- **Robust Data Fetchers**: Parallel-safe modules for KRX (prices), DART (fundamentals), and FRED (macro data).
-- **Advanced Factor Engine**: Computes Momentum, Value, Quality, and Macro-regime factors.
-- **`CVXPY`-based Optimizer**: Enforces all constraints (weight, cardinality, sector, etc.) in a single, powerful solver.
-- **Scientific Backtesting**: Simulates historical performance with key metrics (Sharpe, MDD).
-- **Automated Tuning**: Uses `Optuna` to find the best strategy parameters automatically.
+- **Robust Data Fetchers**: Modules for KRX (prices), DART (fundamentals), and FRED/yfinance (macro data), with built-in rate limiting and error handling.
+- **Advanced Factor Engine**: Computes a sophisticated alpha signal from a composite of **Momentum**, **Value**, **Quality**, and **Macro-Regime** factors.
+- **`CVXPY`-based Optimizer**: Enforces all constraints (weight, cardinality, sector, small-cap) in a single, powerful mixed-integer solver.
+- **Scientific Backtesting**: Simulates historical strategy performance with key metrics like Sharpe Ratio and Maximum Drawdown.
+- **Automated Tuning**: Uses `Optuna` to discover the optimal strategy hyperparameters automatically.
 ---
 ## System Architecture
 
-The system is organized into distinct, decoupled modules. The `main.py` script orchestrates the portfolio generation pipeline, while the `backtester.py` and `tuner.py` scripts provide a powerful research and optimization framework.
+The system is organized into distinct, decoupled modules.
 
 ```
 /timefolio-2025
@@ -38,13 +39,13 @@ The system is organized into distinct, decoupled modules. The `main.py` script o
 ├── risk_monitor.py             # Post-trade risk analysis and reporting.
 |
 ├── fetchers/                   # Modules for fetching external data.
-│ ├── init.py
-│ ├── krx_fetcher.py            # Market data (OHLCV, Market Cap)
-│ ├── financial_fetcher.py      # Fundamental data (DART)
-│ └── macro_fetcher.py          # Macroeconomic data (FRED,yfinance)
+│   ├── __init__.py
+│   ├── krx_fetcher.py          # Market data (OHLCV, Market Cap)
+│   ├── financial_fetcher.py    # Fundamental data (DART)
+│   └── macro_fetcher.py        # Macroeconomic data (FRED, yfinance)
 |
 ├── config/
-│ └── config.yaml               # Central configuration file.
+│   └── config.yaml             # Central configuration file.
 |
 └── krx_data.db                 # Central SQLite Database
 ```
@@ -53,15 +54,14 @@ The system is organized into distinct, decoupled modules. The `main.py` script o
 
 The project follows a professional quantitative research and production lifecycle:
 
-1.  **Data Population:** Use the standalone `fetchers` (or `backfill_krx_data.py`) to populate a local SQLite database with market, fundamental, and macro data. This is done once or periodically to keep the local data store fresh.
-2.  **Strategy Research & Tuning:** Use `tuner.py` to run dozens or hundreds of backtests, automatically finding the optimal parameters (e.g., factor windows, risk aversion) that maximize historical performance. This is the core research step.
+1.  **Data Population:** Use the standalone `fetchers` to populate a local SQLite database with market, fundamental, and macro data. This is done once or periodically to keep the local data store fresh.
+2.  **Strategy Research & Tuning:** Use `tuner.py` to run dozens or hundreds of backtests, automatically finding the optimal parameters (e.g., factor windows, risk aversion) that maximize historical performance.
 3.  **Validation:** Update `config.yaml` with the best parameters found by the tuner. Then, use `backtester.py` to run a single, full backtest to generate a detailed performance report and equity curve for the final, tuned strategy.
 4.  **Production Run:** Execute `main.py` to generate the final portfolio for the upcoming period using the validated, optimal configuration.
 ---
 ## Prerequisites
 -   Python 3.9+ & SQLite 3
--   API keys in a `.env` file: `DART_API_KEY`, `FRED_API_KEY`.
--   All packages from `requirements.txt`.
+-   API keys for DART and FRED.
 ---
 ## Installation
 
@@ -76,9 +76,9 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # 3. Create a .env file for your API keys (in the project root)
 cp .env.example .env
-# Edit the .env file with your DART_API_KEY and FRED_API_KEY
+# -> Now, edit the .env file with your DART_API_KEY and FRED_API_KEY
 
-# 4. Install all dependencies
+# 4. Install all dependencies from the corrected requirements file
 pip install -r requirements.txt
 ```
 ---
@@ -97,36 +97,41 @@ data_settings:
 ---
 ## CLI Usage
 
-### Step 1: Data Population (Run once, then periodically)
-Run these scripts to download the latest data into your local `krx_data.db`. Use the -m flag to run modules as scripts from the project root. Recommended to fetch data for 1 year at a time.
+### **Step 1: Populate Your Database (Run once, then periodically)**
+Run these scripts from the project root to download data into `krx_data.db`. It's recommended to fetch data for one year at a time to respect API limits.
 
 ```bash
+# Note: The -m flag is crucial for running scripts inside a package.
+
 # Fetch historical market data from KRX
-python -m fetchers.krx_fetcher -s 20200101 -e 20201231 --update-db
+# ex: For the year 2022
+python -m fetchers.krx_fetcher -s 20220101 -e 20221231 --update-db
 
 # Fetch annual financial statements from DART for all universe stocks
-python -m fetchers.financial_fetcher --all -s 20200101 -e 20201231
+# ex: For the year 2021's reports (usually available in 2022)
+python -m fetchers.financial_fetcher --all -s 2021 -e 2021
 
-# Fetch historical macroeconomic data from FRED and yfinance
-python -m fetchers.macro_fetcher -s 2020-01-01 -e 2020-12-31
+# Fetch historical macroeconomic data
+# ex: For the year 2022
+python -m fetchers.macro_fetcher -s 2022-01-01 -e 2022-12-31
 ```
 
-### Step 2: Find Optimal Parameters (Research Phase)
-Use the tuner to discover the best parameters for your strategy. This is an intensive process that may take several hours Results are saved in tuning_results.db.
+### **Step 2: Find Optimal Parameters (Research Phase)**
+This may take several hours. Results are saved in `tuning_results.db`.
 
 ```bash
 python tuner.py --n-trials 100 --study-name "tuning-v1"
 ```
-After the run, copy the "Best Parameters" from the output and update your `config.yaml`.
+After the run, copy the "Best Parameters" from the output into your `config.yaml`.
 
-### Step 3: Validate Strategy (Verification Phase)
-Run a full backtest using your newly tuned parameters to confirm performance and generate an equity curve.
+### **Step 3: Validate Strategy (Verification Phase)**
+Run a full backtest using your tuned parameters to confirm performance.
 
 ```bash
-python backtester.py --start 2022-01-01 --end 2025-06-30
+python backtester.py --start 2022-01-01 --end 2023-12-31
 ```
 
-### Step 4: Generate Final Portfolio (Production Run)
+### **Step 4: Generate Final Portfolio (Production Run)**
 Execute the main pipeline to generate the portfolio for the upcoming period.
 
 ```bash
@@ -135,7 +140,7 @@ python main.py --output-dir output/
 ---
 ## Technical Framework
 
--   **Alpha Model**: A multi-factor model combining **Momentum**, **Value**, **Quality**, **Profitability**, **Low Beta**, and **Macro Regime** signals. Factors are intelligently weighted based on the macro environment.
+-   **Alpha Model**: A multi-factor model combining **Momentum**, **Value**, **Quality**, **Profitability**, and **Macro Regime** signals. Factors are intelligently weighted based on the macro environment.
 -   **Portfolio Construction**: Mean-Variance Optimization with L2 regularization and mixed-integer constraints.
     -   `Objective: max  μ'w - λ·w'Σw - η·||w||₂²`
 -   **Constraints Enforced in Solver**:
@@ -144,7 +149,7 @@ python main.py --output-dir output/
     -   Weight Limits: `0.01 ≤ w_i ≤ 0.15`
     -   Sector Exposure: Dynamic limits based on `market_sectors.csv`.
     -   Small-Cap Limit: `Σw_small_cap ≤ 0.40`.
--   **Risk Management**: Post-optimization analysis via `RiskMonitor` checks HHI for weight and return concentration, MDD, and weekly turnover to ensure full contest compliance.
+-   **Risk Management**: Post-optimization analysis via `RiskMonitor` checks HHI, MDD, and weekly turnover to ensure compliance.
 ---
 ## Outputs
 
@@ -157,5 +162,5 @@ python main.py --output-dir output/
 ---
 ## License & Acknowledgements
 -   **License**: MIT
--   **Libraries**: Optuna, CVXPY, Pandas, NumPy, Scikit-learn, XGBoost, PyYAML, yfinance, fredapi, pandas-market-calendars
+-   **Libraries**: Optuna, CVXPY, Pandas, NumPy, Scikit-learn, XGBoost, PyYAML, yfinance, fredapi, pandas-market-calendars, OpenDartReader-unofficial
 -   **Data Sources**: Korea Exchange (KRX), DART, FRED Economic Data
