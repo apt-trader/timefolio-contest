@@ -96,9 +96,7 @@ class MacroFetcher:
 
     @rate_limited(max_per_second=2)
     def _fetch_kospi_momentum(self, as_of_date: str) -> Tuple[Optional[float], Optional[float]]:
-        """
-        Fetch KOSPI momentum data using yfinance, ensuring native float types are returned.
-        """
+        """Fetch KOSPI momentum data using yfinance, ensuring native float types are returned."""
         try:
             end_date = pd.to_datetime(as_of_date) + pd.Timedelta(days=1)
             start_date = end_date - pd.Timedelta(days=180)
@@ -113,7 +111,6 @@ class MacroFetcher:
             
             latest_close = kospi_close.iloc[-1]
             
-            # Ensure we have enough data points for calculations
             mom_1m = None
             if len(kospi_close) >= 22:
                 mom_1m = (latest_close / kospi_close.iloc[-22] - 1) * 100
@@ -122,7 +119,6 @@ class MacroFetcher:
             if len(kospi_close) >= 64:
                 mom_3m = (latest_close / kospi_close.iloc[-64] - 1) * 100
 
-            # Explicitly cast to native Python float or None before returning
             return (float(mom_1m) if mom_1m is not None else None, 
                     float(mom_3m) if mom_3m is not None else None)
         except Exception as e:
@@ -137,7 +133,9 @@ class MacroFetcher:
             vix_data = yf.Ticker('^VIX').history(start=as_of_date, end=end_date)
             if vix_data.empty:
                 raise ValueError("yfinance returned no VIX data")
+
             return float(vix_data['Close'].iloc[0])
+            
         except Exception as e:
             logger.error(f"Could not fetch VIX data: {e}")
             return None
@@ -146,32 +144,26 @@ class MacroFetcher:
         """Fetch all macroeconomic data for a given date and store it in the database."""
         logger.info(f"Processing macro data for {as_of_date}")
         
-        # 1. Skip if data already exists
         if self.conn.execute("SELECT 1 FROM macro_data WHERE date = ?", (as_of_date,)).fetchone():
             logger.info(f"Data for {as_of_date} already exists. Skipping.")
             return
 
-        # 2. Check if it's a US trading day. FRED and VIX data depend on it.
         nyse = mcal.get_calendar('NYSE')
         if not nyse.valid_days(start_date=as_of_date, end_date=as_of_date).size:
             logger.info(f"Skipping {as_of_date} as it's a US market holiday or weekend.")
             return
 
-        # 3. Fetch all data points
         eq_mom_1m, eq_mom_3m = self._fetch_kospi_momentum(as_of_date)
         vix = self._fetch_vix(as_of_date)
         us10y = self._fetch_fred_data('DGS10', as_of_date)
         us2y = self._fetch_fred_data('DGS2', as_of_date)
         us3m = self._fetch_fred_data('DGS3MO', as_of_date)
 
-        # 4. Calculate spreads
         us10y3m = (us10y - us3m) if us10y is not None and us3m is not None else None
         us10y2y = (us10y - us2y) if us10y is not None and us2y is not None else None
 
-        # 5. Prepare data for insertion (types are already native Python float/None)
         data = (as_of_date, eq_mom_1m, eq_mom_3m, vix, us10y, us2y, us3m, us10y3m, us10y2y)
 
-        # 6. Insert or replace into database
         sql = "INSERT OR REPLACE INTO macro_data (date, eq_mom_1m, eq_mom_3m, vix, us10y, us2y, us3m, us10y3m, us10y2y) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         with self.conn:
             self.conn.execute(sql, data)
