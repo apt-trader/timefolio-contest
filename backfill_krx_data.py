@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from tqdm import tqdm
 import pandas as pd
-from krx_fetcher import KRXDataFetcher
+from fetchers.krx_fetcher import KRXDataFetcher
 
 # Configure logging
 logging.basicConfig(

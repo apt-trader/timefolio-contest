@@ -1,24 +1,32 @@
 # config/config.yaml
+
+# --- Data and Date Settings ---
 data_settings:
-  stock_universe_file: "data/sector_universe.csv"
-  market_sectors_file: "data/market_sectors.csv"
+  # These paths are relative to the project root (timefolio-2025-main/)
+  stock_universe_file: "sector_universe.csv"
+  market_sectors_file: "market_sectors.csv"
   db_path: "krx_data.db"
+  
+  # Global date range for backtesting and analysis
   start_date: '2022-01-01'
   end_date: '2025-06-30'
 
+# --- Portfolio Optimization Parameters ---
 optimization:
-  max_positions: 12
-  individual_limit: 0.15
-  min_weight: 0.01
-  risk_aversion: 1.25      # Tunable parameter
-  l2_penalty: 0.2          # Tunable parameter
-  
-risk_management:
-  min_avg_daily_value: 3000000000
-  min_ipo_days: 90
-  small_cap_threshold: 1000000000000 # 1 Trillion KRW
-  max_small_cap_weight: 0.40
+  max_positions: 12           # Cardinality constraint (max number of stocks)
+  individual_limit: 0.15      # Max weight for any single stock
+  min_weight: 0.01            # Min weight for any single stock
+  risk_aversion: 1.25         # Tunable: How much to penalize risk. Higher = more conservative.
+  l2_penalty: 0.2             # Tunable: Regularization to prevent overfitting.
 
+# --- Pre-Optimization Data Filters ---
+risk_management:
+  min_avg_daily_value: 3000000000 # Min avg 20-day trading value (in KRW)
+  min_ipo_days: 90                 # Stock must be listed for at least 90 days
+  small_cap_threshold: 1000000000000 # 1 Trillion KRW defines small-cap
+  max_small_cap_weight: 0.40         # Max total weight of small-cap stocks
+
+# --- Alpha Factor Calculation Settings ---
 factor_engine:
-  mom_windows: [20, 60, 120] # Tunable parameters
-  vol_window: 25             # Tunable parameter
+  mom_windows: [20, 60, 120]  # Tunable: Momentum lookback windows (in days)
+  vol_window: 25              # Tunable: Volatility lookback window (in days)

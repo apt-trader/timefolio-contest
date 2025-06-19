@@ -16,6 +16,7 @@ logs/
 
 # Environment variables
 .env
+.envrc
 
 # Data CSV files
 forbidden.csv
@@ -24,7 +25,6 @@ sector_universe.csv
 
 # Exclude backup directory
 backup/
-backup/krx_data_krx_fin.db
 
 # Cache and log directories
 docs_cache/
@@ -37,6 +37,3 @@ logs/
 ._*
 .Spotlight-V100
 .Trashes
-
-# Environment variables
-.env

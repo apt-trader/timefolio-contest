@@ -18,11 +18,14 @@ class DataManager:
         self.cfg = cfg
         self.db_path = cfg.db_path
         self._krx = KRXFetcher(db_path=self.db_path)
-        self._fin = FinancialsFetcher(api_key=cfg.fetcher_settings.get('dart_api_key'), db_path=self.db_path)
+        self._fin = FinancialsFetcher(
+            api_key=cfg.fetcher_settings.get('dart_api_key'), 
+            db_path=self.db_path
+        )
         self._macro = MacroFetcher(fred_api_key=cfg.fetcher_settings.get('fred_api_key'))
         self.tickers, self.sector_map = self._initialize_universe()
         logger.info(f"DataManager initialized with {len(self.tickers)} compliant tickers.")
-
+    
     def _initialize_universe(self) -> tuple[list[str], dict[str, str]]:
         # ... (This logic is correct and remains the same) ...
         # It correctly uses ComplianceFilter to produce a clean universe

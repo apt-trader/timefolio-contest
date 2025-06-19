@@ -1,20 +1,27 @@
 # TimeFolio Portfolio System
 
-A modular, A+-grade system for building, backtesting, and optimizing compliant Korean equity portfolios. It features a complete, end-to-end quantitative workflow, from data ingestion and multi-factor alpha modeling to hyperparameter tuning and risk analysis.
-
+A modular, professional-grade system for building, backtesting, and optimizing compliant Korean equity portfolios. It features a complete, end-to-end quantitative workflow, from data ingestion and multi-factor alpha modeling to hyperparameter tuning and risk analysis.
+---
 ## Table of Contents
 
-1.  [System Architecture](#system-architecture)
-2.  [The Quantitative Workflow](#the-quantitative-workflow)
-3.  [Prerequisites](#prerequisites)
-4.  [Installation](#installation)
-5.  [Configuration](#configuration)
-6.  [Core Components](#core-components)
+1.  [Key Features](#key-features)
+2.  [System Architecture](#system-architecture)
+3.  [The Quantitative Workflow](#the-quantitative-workflow)
+4.  [Prerequisites](#prerequisites)
+5.  [Installation](#installation)
+6.  [Configuration](#configuration)
 7.  [CLI Usage](#cli-usage)
-8.  [Technical Framework](#technical-framework)
-9.  [Outputs](#outputs)
-10. [License & Acknowledgements](#license--acknowledgements)
+8.  [Outputs](#outputs)
+9.  [License & Acknowledgements](#license--acknowledgements)
+---
+## Key Features
 
+- **Robust Data Fetchers**: Parallel-safe modules for KRX (prices), DART (fundamentals), and FRED (macro data).
+- **Advanced Factor Engine**: Computes Momentum, Value, Quality, and Macro-regime factors.
+- **`CVXPY`-based Optimizer**: Enforces all constraints (weight, cardinality, sector, etc.) in a single, powerful solver.
+- **Scientific Backtesting**: Simulates historical performance with key metrics (Sharpe, MDD).
+- **Automated Tuning**: Uses `Optuna` to find the best strategy parameters automatically.
+---
 ## System Architecture
 
 The system is organized into distinct, decoupled modules. The `main.py` script orchestrates the portfolio generation pipeline, while the `backtester.py` and `tuner.py` scripts provide a powerful research and optimization framework.
@@ -31,18 +38,17 @@ The system is organized into distinct, decoupled modules. The `main.py` script o
 ├── risk_monitor.py             # Post-trade risk analysis and reporting.
 |
 ├── fetchers/                   # Modules for fetching external data.
-│   ├── krx_fetcher.py          # Market data (OHLCV, Market Cap)
-│   ├── financial_fetcher.py    # Fundamental data (DART)
-│   └── macro_fetcher.py        # Macroeconomic data (FRED)
+│ ├── init.py
+│ ├── krx_fetcher.py            # Market data (OHLCV, Market Cap)
+│ ├── financial_fetcher.py      # Fundamental data (DART)
+│ └── macro_fetcher.py          # Macroeconomic data (FRED,yfinance)
 |
-├── utils/                      # Common utility functions.
-│   ├── portfolio_metrics.py
-│   └── sector_parser.py
+├── config/
+│ └── config.yaml               # Central configuration file.
 |
-└── config/
-    └── config.yaml             # Central configuration file.
+└── krx_data.db                 # Central SQLite Database
 ```
-
+---
 ## The Quantitative Workflow
 
 The project follows a professional quantitative research and production lifecycle:
@@ -51,16 +57,16 @@ The project follows a professional quantitative research and production lifecycl
 2.  **Strategy Research & Tuning:** Use `tuner.py` to run dozens or hundreds of backtests, automatically finding the optimal parameters (e.g., factor windows, risk aversion) that maximize historical performance. This is the core research step.
 3.  **Validation:** Update `config.yaml` with the best parameters found by the tuner. Then, use `backtester.py` to run a single, full backtest to generate a detailed performance report and equity curve for the final, tuned strategy.
 4.  **Production Run:** Execute `main.py` to generate the final portfolio for the upcoming period using the validated, optimal configuration.
-
+---
 ## Prerequisites
--   Python 3.8+ & SQLite 3
+-   Python 3.9+ & SQLite 3
 -   API keys in a `.env` file: `DART_API_KEY`, `FRED_API_KEY`.
 -   All packages from `requirements.txt`.
-
+---
 ## Installation
 
 ```bash
-# 1. Clone the repository and navigate into it
+# 1. Clone the repository
 git clone https://github.com/your-org/timefolio-2025.git
 cd timefolio-2025
 
@@ -68,12 +74,12 @@ cd timefolio-2025
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# 3. Install all dependencies
-pip install -r requirements.txt
-
-# 4. Set up environment variables
+# 3. Create a .env file for your API keys (in the project root)
 cp .env.example .env
-# Edit the .env file with your personal API keys
+# Edit the .env file with your DART_API_KEY and FRED_API_KEY
+
+# 4. Install all dependencies
+pip install -r requirements.txt
 ```
 ---
 ## Configuration
@@ -83,76 +89,48 @@ All system parameters are managed in `config/config.yaml`. This centralized appr
 ```yaml
 # config/config.yaml
 data_settings:
-  stock_universe_file: "data/sector_universe.csv"
-  market_sectors_file: "data/market_sectors.csv"
+  # Paths are relative to the project root
+  stock_universe_file: "sector_universe.csv"
+  market_sectors_file: "market_sectors.csv"
   db_path: "krx_data.db"
-  start_date: '2022-01-01'
-  end_date: '2024-06-01'
-
-optimization:
-  max_positions: 12
-  individual_limit: 0.15
-  min_weight: 0.01
-  risk_aversion: 1.25      # Tunable parameter
-  l2_penalty: 0.2          # Tunable parameter
-  
-risk_management:
-  min_avg_daily_value: 3000000000
-  min_ipo_days: 90
-  small_cap_threshold: 1000000000000 # 1 Trillion KRW
-  max_small_cap_weight: 0.40
-
-factor_engine:
-  mom_windows: [20, 60, 120] # Tunable parameters
-  vol_window: 25             # Tunable parameter
 ```
----
-## Core Components
-
--   **`fetchers/`**: A suite of robust modules for pulling data from KRX, DART (financials), and FRED (macro), and persisting it to a local SQLite DB.
--   **`data_manager.py`**: The single source of truth for data. It runs compliance filters and provides the rest of the application with clean, aligned, and analysis-ready data from all sources.
--   **`factor_engine.py`**: A sophisticated alpha model that calculates and combines technical, fundamental (Value, Quality, Profitability), and macroeconomic factors into a unified return forecast.
--   **`optimizer.py`**: A powerful `CVXPY`-based optimization engine that enforces all contest rules (position count, weight limits, sector caps, small-cap limits) within a mixed-integer quadratic program.
--   **`backtester.py`**: A scientific tool for simulating strategy performance over historical periods, providing key metrics like Sharpe Ratio and Max Drawdown.
--   **`tuner.py`**: An automated `Optuna`-based script that runs hundreds of backtests to find the optimal set of strategy parameters.
-
 ---
 ## CLI Usage
 
-### **Step 1: Data Population (As Needed)**
-Run these scripts to download the latest data into your local `krx_data.db`.
+### Step 1: Data Population (Run once, then periodically)
+Run these scripts to download the latest data into your local `krx_data.db`. Use the -m flag to run modules as scripts from the project root. Recommended to fetch data for 1 year at a time.
 
 ```bash
-# Fetch historical market data from KRX (e.g., for the last 2 years)
-python fetchers/krx_fetcher.py --start-date 20220101 --end-date 20250630
+# Fetch historical market data from KRX
+python -m fetchers.krx_fetcher -s 20220101 -e 20221231 --update-db
 
-# Fetch historical financial statements from DART for all universe stocks
-python fetchers/financial_fetcher.py --all --start-year 2022 --end-year 2025
+# Fetch annual financial statements from DART for all universe stocks
+python -m fetchers.financial_fetcher --all -s 20220101 -e 20221231
 
-# Fetch historical macroeconomic data from FRED
-python fetchers/macro_fetcher.py --start-date 2022-01-01 --end-date 2025-06-30
+# Fetch historical macroeconomic data from FRED and yfinance
+python -m fetchers.macro_fetcher -s 2022-01-01 -e 2022-12-31
 ```
 
-### **Step 2: Find Optimal Parameters (Research Phase)**
-Use the tuner to discover the best parameters for your strategy. This is an intensive process that may take several hours.
+### Step 2: Find Optimal Parameters (Research Phase)
+Use the tuner to discover the best parameters for your strategy. This is an intensive process that may take several hours Results are saved in tuning_results.db.
 
 ```bash
-python tuner.py --n-trials 100 --study-name "full-factor-tuning-v1"
+python tuner.py --n-trials 100 --study-name "tuning-v1"
 ```
 After the run, copy the "Best Parameters" from the output and update your `config.yaml`.
 
-### **Step 3: Validate Strategy (Verification Phase)**
+### Step 3: Validate Strategy (Verification Phase)
 Run a full backtest using your newly tuned parameters to confirm performance and generate an equity curve.
 
 ```bash
-python backtester.py --config config/config.yaml --start 2022-01-01 --end 2025-06-30
+python backtester.py --start 2022-01-01 --end 2025-06-30
 ```
 
-### **Step 4: Generate Final Portfolio (Production Run)**
+### Step 4: Generate Final Portfolio (Production Run)
 Execute the main pipeline to generate the portfolio for the upcoming period.
 
 ```bash
-python main.py --config config/config.yaml --output-dir output/
+python main.py --output-dir output/
 ```
 ---
 ## Technical Framework
@@ -167,7 +145,7 @@ python main.py --config config/config.yaml --output-dir output/
     -   Sector Exposure: Dynamic limits based on `market_sectors.csv`.
     -   Small-Cap Limit: `Σw_small_cap ≤ 0.40`.
 -   **Risk Management**: Post-optimization analysis via `RiskMonitor` checks HHI for weight and return concentration, MDD, and weekly turnover to ensure full contest compliance.
-
+---
 ## Outputs
 
 -   **Final Portfolio**: `output/final_portfolio.csv`
@@ -179,5 +157,5 @@ python main.py --config config/config.yaml --output-dir output/
 ---
 ## License & Acknowledgements
 -   **License**: MIT
--   **Libraries**: Optuna, CVXPY, Pandas, NumPy, Scikit-learn, XGBoost, PyYAML
+-   **Libraries**: Optuna, CVXPY, Pandas, NumPy, Scikit-learn, XGBoost, PyYAML, yfinance, fredapi, pandas-market-calendars
 -   **Data Sources**: Korea Exchange (KRX), DART, FRED Economic Data
