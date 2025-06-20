@@ -1,27 +1,27 @@
 """
 KRX Data Fetcher Module
 
-This module provides a robust interface for fetching historical market data from KRX
-using their OTP-based download system. It handles throttling, error recovery,
-and data persistence.
+This module provides a robust, polite interface for fetching historical market data from KRX.
+It handles throttling with jitter, file-level caching, error recovery, and data persistence.
 """
 #
 import time
 import sqlite3
 import logging
-from datetime import datetime, timedelta
+import random
+import argparse
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Optional
 from io import BytesIO
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter, Retry
+from tqdm import tqdm
 
-# Ensure logs directory exists in the project root
-logs_dir = Path('logs')
+# Configure logging
+logs_dir = Path(__file__).parent.parent / 'logs'
 logs_dir.mkdir(exist_ok=True)
-
-# Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -43,23 +43,15 @@ DEFAULT_HEADERS = {
 class KRXDataFetcher:
     """
     A class to fetch and manage KRX market data using the OTP-based download system.
-    
-    This class handles:
-    - Session management with retries
-    - Request throttling
-    - Data caching
-    - Error handling and recovery
-    - Database persistence
     """
-    
     def __init__(self, cache_dir: str = None, db_path: str = str(Path(__file__).parent.parent / "krx_data.db"), 
                  throttle: float = 0.5, max_retries: int = 3):
-        # Set cache directory to be within the fetchers directory if not specified
         if cache_dir is None:
             self.cache_dir = Path(__file__).parent / 'krx_cache'
         else:
             self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True, parents=True)
+        
         self.db_path = db_path
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.throttle = throttle
@@ -69,224 +61,179 @@ class KRXDataFetcher:
         self._init_database()
     
     def _create_session(self) -> requests.Session:
-        """Create and configure a requests session with retry logic."""
         session = requests.Session()
-        retry_strategy = Retry(
-            total=3, backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504]
-        )
+        retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
         session.headers.update(DEFAULT_HEADERS)
         return session
     
     def _throttle(self):
-        """Enforce request throttling to respect rate limits."""
+        """Enforces request throttling with randomized jitter."""
         elapsed = time.time() - self.last_request
         if elapsed < self.throttle:
             time.sleep(self.throttle - elapsed)
+        
+        jitter = random.uniform(0.5, 1.5)
+        time.sleep(jitter)
         self.last_request = time.time()
     
     def _init_database(self):
-        """Initialize the SQLite database with required tables."""
         with self.conn:
             self.conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_prices (
-                code TEXT, date DATE,
-                open REAL, high REAL, low REAL, close REAL,
-                volume INTEGER, value INTEGER, market_cap REAL,
-                market TEXT, name TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (code, date)
-            )
-            """)
+                code TEXT, date DATE, open REAL, high REAL, low REAL, close REAL,
+                volume INTEGER, value INTEGER, market_cap REAL, market TEXT, name TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (code, date)
+            )""")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_prices_code ON daily_prices (code)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices (date)")
     
-    def _get_otp(self, mkt: str, date: str) -> str:
-        """Get OTP for data download."""
+    def _get_otp(self, mkt: str, date: str) -> Optional[str]:
         payload = {
-            "bld": "dbms/MDC/STAT/standard/MDCSTAT01501", 
-            "mktId": mkt,
-            "trdDd": date,
-            "share": "1",
-            "money": "1",
-            "csvxls_isNo": "false",
-            "name": "fileDown",
+            "bld": "dbms/MDC/STAT/standard/MDCSTAT01501", "mktId": mkt, "trdDd": date,
+            "share": "1", "money": "1", "csvxls_isNo": "false", "name": "fileDown",
             "url": "dbms/MDC/STAT/standard/MDCSTAT01501"
         }
-        
         for attempt in range(self.max_retries + 1):
             try:
                 self._throttle()
-                logger.debug(f"Requesting OTP for {mkt} on {date} (attempt {attempt + 1})")
+                logger.debug(f"Requesting OTP for {mkt} on {date} (attempt {attempt+1})")
                 response = self.session.post(GEN_OTP_URL, data=payload, timeout=30)
                 response.raise_for_status()
                 otp = response.text.strip()
-                if not otp:
-                    raise ValueError("Empty OTP received")
-                logger.debug(f"Successfully received OTP '{otp}' for {mkt} on {date}")
+                if not otp: raise ValueError("Empty OTP received")
                 return otp
             except (requests.RequestException, ValueError) as e:
                 if attempt == self.max_retries:
                     logger.error(f"Failed to get OTP after {self.max_retries+1} attempts: {e}")
-                    raise
-                logger.warning(f"Attempt {attempt + 1} to get OTP failed, retrying... Error: {e}")
+                    return None
+                logger.warning(f"Attempt {attempt+1} to get OTP failed, retrying... Error: {e}")
                 time.sleep(attempt + 1)
-    
-    def _download_data(self, otp: str) -> pd.DataFrame:
-        """
-        Download data using OTP and return a raw DataFrame.
-        Handles non-trading days by returning an empty DataFrame.
-        """
+
+    def _download_data_raw(self, otp: str) -> Optional[bytes]:
+        """Helper function to download the raw bytes of the CSV file."""
+        if not otp: return None
         try:
             self._throttle()
-            logger.debug(f"Downloading data with OTP: {otp}")
+            logger.debug(f"Downloading raw data with OTP: {otp}")
             response = self.session.post(DOWNLOAD_URL, data={"code": otp}, timeout=60, stream=True)
             response.raise_for_status()
-            
-            # Return the raw DataFrame from the CSV content
-            return pd.read_csv(BytesIO(response.content), encoding='EUC-KR')
-
-        except pd.errors.EmptyDataError:
-            # This is an expected condition for non-trading days (holidays)
-            logger.warning("Received empty data, which is expected for a non-trading day. Skipping.")
-            return pd.DataFrame()
+            content = response.content
+            if not content:
+                logger.warning("Received empty file, likely a non-trading day.")
+                return None
+            return content
         except Exception as e:
-            logger.error(f"An unexpected error occurred while downloading data: {e}", exc_info=True)
-            raise
+            logger.error(f"Failed to download raw data: {e}")
+            return None
 
     def fetch_daily_data(self, date, markets: List[str] = None) -> Dict[str, pd.DataFrame]:
-        """
-        Fetch, process, and clean daily data for all tickers in specified markets.
-        This function is now the single source of truth for data processing.
-        """
-        if markets is None:
-            markets = ["STK", "KSQ"]
-            
-        if isinstance(date, datetime):
-            date_str = date.strftime('%Y%m%d')
-            date_dt = date
-        else:
-            date_str = date
-            date_dt = datetime.strptime(date_str, '%Y%m%d')
+        """Fetches, processes, and cleans daily data, using a file cache."""
+        if markets is None: markets = ["STK", "KSQ"]
+        
+        date_str = date.strftime('%Y%m%d') if isinstance(date, datetime) else date
+        date_dt = datetime.strptime(date_str, '%Y%m%d')
             
         results = {}
         for mkt in markets:
+            df = pd.DataFrame()
             try:
-                logger.info(f"Fetching {mkt} data for {date_str}")
-                otp = self._get_otp(mkt, date_str)
-                df = self._download_data(otp)
+                cache_file = self.cache_dir / f"{mkt}-{date_str}.csv"
+                
+                if cache_file.exists():
+                    logger.info(f"Using cached file for {mkt} on {date_str}")
+                    df = pd.read_csv(cache_file, encoding='EUC-KR', dtype={'종목코드': str})
+                else:
+                    logger.info(f"Fetching {mkt} data for {date_str} from network")
+                    otp = self._get_otp(mkt, date_str)
+                    raw_bytes = self._download_data_raw(otp)
+                    
+                    if raw_bytes:
+                        df = pd.read_csv(BytesIO(raw_bytes), encoding='EUC-KR', dtype={'종목코드': str})
+                        with open(cache_file, 'wb') as f:
+                            f.write(raw_bytes)
+                    else:
+                        logger.warning(f"No data downloaded for {mkt} on {date_str}.")
+                        df = pd.DataFrame()
                 
                 if df.empty:
-                    logger.warning(f"No data returned for {mkt} on {date_str} (likely a holiday).")
+                    results[mkt] = df
                     continue
-                
-                # FIX: Consolidate all data cleaning and processing here.
-                
-                # 1. Define the authoritative column map
-                column_map = {
-                    '종목코드': 'code', 
-                    '종목명': 'name', 
-                    '시장구분': 'market_name', 
-                    '시가': 'open', 
-                    '고가': 'high', 
-                    '저가': 'low', 
-                    '종가': 'close', 
-                    '거래량': 'volume', 
-                    '거래대금': 'value', 
-                    '시가총액': 'market_cap'
-                }
-                df.rename(columns=column_map, inplace=True)
 
-                # 2. Add metadata columns
+                column_map = {'종목코드': 'code', '종목명': 'name', '시장구분': 'market_name', '시가': 'open', '고가': 'high', '저가': 'low', '종가': 'close', '거래량': 'volume', '거래대금': 'value', '시가총액': 'market_cap'}
+                df.rename(columns=column_map, inplace=True)
                 df['date'] = date_dt
                 df['market'] = mkt
+                df['code'] = df['code'].str.zfill(6)
                 
-                # 3. Standardize stock code format
-                df['code'] = df['code'].astype(str).str.zfill(6)
-                
-                # 4. Convert all numeric columns, coercing errors to NaN
                 numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'value', 'market_cap']
                 for col in numeric_cols:
                     if col in df.columns:
                         df[col] = pd.to_numeric(df[col], errors='coerce')
                 
-                # 5. Select and order the final set of columns
                 final_columns = ['code', 'name', 'date', 'market', 'open', 'high', 'low', 'close', 'volume', 'value', 'market_cap']
                 df = df.reindex(columns=final_columns)
-
-                # 6. Fill any NaN values that resulted from coercion (e.g., for suspended stocks)
-                for col in ['open', 'high', 'low', 'close', 'market_cap']:
-                    df[col] = df[col].fillna(0.0)
-                for col in ['volume', 'value']:
-                     df[col] = df[col].fillna(0).astype(int)
+                df.fillna({'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0, 'market_cap': 0.0, 'volume': 0, 'value': 0}, inplace=True)
+                df[['volume', 'value']] = df[['volume', 'value']].astype(int)
 
                 results[mkt] = df
-                logger.info(f"Fetched and processed {len(df)} rows for {mkt} on {date_str}")
+                logger.info(f"Processed {len(df)} rows for {mkt} on {date_str}")
+
             except Exception as e:
                 logger.error(f"Critical error processing {mkt} data for {date_str}: {e}", exc_info=True)
-                if mkt in results:
-                    del results[mkt]
+                results[mkt] = pd.DataFrame()
+
         return results
 
     def fetch_historical_data(self, start_date: Union[str, datetime], 
                              end_date: Union[str, datetime] = None,
                              markets: List[str] = None, force_refetch: bool = False) -> pd.DataFrame:
-        """Fetch historical data for a date range."""
         if end_date is None: end_date = datetime.now()
         if isinstance(start_date, str): start_date = datetime.strptime(start_date, '%Y%m%d')
         if isinstance(end_date, str): end_date = datetime.strptime(end_date, '%Y%m%d')
 
         existing_dates = set()
         if not force_refetch:
-            existing_dates = set(d.strftime('%Y%m%d') for d in self.get_available_dates())
+            try:
+                existing_dates = set(d.strftime('%Y%m%d') for d in self.get_available_dates())
+            except Exception as e:
+                logger.warning(f"Could not fetch existing dates from DB: {e}")
 
         date_range = pd.bdate_range(start_date, end_date)
         all_data = []
 
-        for date in date_range:
+        for date in tqdm(date_range, desc="Fetching Historical Market Data"):
             date_str = date.strftime('%Y%m%d')
             if date_str in existing_dates:
-                logger.info(f"Date {date_str} already exists in database, skipping incremental fetch.")
+                logger.debug(f"Date {date_str} already exists in database. Skipping.")
                 continue
-            try:
-                results = self.fetch_daily_data(date, markets)
-                all_data.extend(results.values())
-            except Exception as e:
-                logger.error(f"Error processing {date_str}: {e}")
-                continue
+            
+            daily_results = self.fetch_daily_data(date, markets)
+            for df in daily_results.values():
+                if not df.empty:
+                    all_data.append(df)
 
         if not all_data:
             logger.warning("No new data was fetched for the given period.")
             return pd.DataFrame()
 
         return pd.concat(all_data, ignore_index=True)
-    
+
     def update_database(self, df: pd.DataFrame) -> int:
-        """Update the SQLite database with new data."""
         if df.empty: return 0
-        
-        required_columns = ['code', 'date', 'open', 'high', 'low', 'close', 'volume']
-        if not all(col in df.columns for col in required_columns):
-            raise ValueError(f"DataFrame is missing required columns for DB update.")
-        
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
-        
         db_columns = ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'value', 'market_cap', 'name', 'market']
         df_to_save = df.reindex(columns=db_columns)
-        
         with self.conn:
             cursor = self.conn.cursor()
             try:
                 cursor.execute("BEGIN TRANSACTION")
                 placeholders = ', '.join(['?'] * len(df_to_save.columns))
-                columns_str = ', '.join(f'"{col}"' for col in db_columns)
-                update_cols = [col for col in db_columns if col not in ('code', 'date')]
-                update_clause = ', '.join([f'"{col}"=excluded."{col}"' for col in update_cols])
-                
+                columns_str = ', '.join(f'"{c}"' for c in df_to_save.columns)
+                update_cols = [c for c in df_to_save.columns if c not in ('code', 'date')]
+                update_clause = ', '.join([f'"{c}"=excluded."{c}"' for c in update_cols])
                 sql = f"INSERT INTO daily_prices ({columns_str}) VALUES ({placeholders}) ON CONFLICT(code, date) DO UPDATE SET {update_clause}, updated_at=CURRENT_TIMESTAMP"
-                
                 cursor.executemany(sql, df_to_save.to_records(index=False).tolist())
                 count = cursor.rowcount
                 cursor.execute("COMMIT")
@@ -294,40 +241,18 @@ class KRXDataFetcher:
                 return count
             except Exception as e:
                 cursor.execute("ROLLBACK")
-                logger.error(f"Database update failed: {e}")
+                logger.error(f"Database update failed: {e}", exc_info=True)
                 raise
-    
+
     def get_available_dates(self) -> pd.DatetimeIndex:
-        """Get all dates with available data in the database."""
-        df = pd.read_sql("SELECT DISTINCT date FROM daily_prices ORDER BY date", self.conn, parse_dates=['date'])
+        with self.conn:
+            df = pd.read_sql("SELECT DISTINCT date FROM daily_prices ORDER BY date", self.conn, parse_dates=['date'])
         return pd.DatetimeIndex(df['date'])
-    
-    def get_stock_data(self, code: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
-        """Get historical data for a specific stock."""
-        code = str(code).strip().zfill(6)
-        query = "SELECT * FROM daily_prices WHERE code = ?"
-        params = [code]
-        if start_date:
-            query += " AND date >= ?"
-            params.append(f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}")
-        if end_date:
-            query += " AND date <= ?"
-            params.append(f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}")
-        query += " ORDER BY date"
-        
-        df = pd.read_sql(query, self.conn, params=params, parse_dates=['date'], index_col='date')
-        numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'value', 'market_cap']
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        return df
 
     def __del__(self):
         if self.conn: self.conn.close()
 
-def main():
-    """Example usage of the KRXDataFetcher."""
-    import argparse
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Fetch KRX market data')
     parser.add_argument('-s', '--start-date', required=True, help='Start date (YYYYMMDD)')
     parser.add_argument('-e', '--end-date', required=True, help='End date (YYYYMMDD)')
@@ -339,20 +264,14 @@ def main():
     fetcher = KRXDataFetcher()
     markets = ['STK', 'KSQ'] if args.market == 'ALL' else [args.market]
     
-    logger.info(f"Fetching data from {args.start_date} to {args.end_date} for markets: {', '.join(markets)}")
     df = fetcher.fetch_historical_data(args.start_date, args.end_date, markets, force_refetch=args.force_refetch)
     
     if df.empty:
         logger.info("No new data to update in the database.")
-        return
-    
-    if args.update_db:
+    elif args.update_db:
         fetcher.update_database(df)
     else:
         print("\n--- Fetched Data Sample ---")
         print(df[['code', 'name', 'date', 'open', 'close', 'volume', 'value', 'market_cap']].head())
     
     logger.info("Done!")
-
-if __name__ == "__main__":
-    main()
