@@ -92,7 +92,7 @@ class MacroFetcher:
         if data.empty or pd.isna(data.iloc[0]):
             logger.warning(f"No data for FRED series '{series_id}' on {as_of_date}.")
             return None
-        return float(data.iloc[0])
+        return data.iloc[0]
 
     @rate_limited(max_per_second=2)
     def _fetch_kospi_momentum(self, as_of_date: str) -> Tuple[Optional[float], Optional[float]]:
@@ -109,18 +109,23 @@ class MacroFetcher:
             
             kospi_close = kospi['Close'].dropna()
             
-            latest_close = kospi_close.iloc[-1]
-            
             mom_1m = None
-            if len(kospi_close) >= 22:
-                mom_1m = (latest_close / kospi_close.iloc[-22] - 1) * 100
-            
             mom_3m = None
-            if len(kospi_close) >= 64:
-                mom_3m = (latest_close / kospi_close.iloc[-64] - 1) * 100
 
-            return (float(mom_1m) if mom_1m is not None else None, 
-                    float(mom_3m) if mom_3m is not None else None)
+            # --- DEFINITIVE FIX IS HERE ---
+            if len(kospi_close) >= 22:
+                # Use .item() to extract the single value as a native Python scalar
+                latest = kospi_close.iloc[-1].item()
+                past = kospi_close.iloc[-22].item()
+                mom_1m = (latest / past - 1) * 100 if past != 0 else 0.0
+
+            if len(kospi_close) >= 64:
+                latest = kospi_close.iloc[-1].item()
+                past = kospi_close.iloc[-64].item()
+                mom_3m = (latest / past - 1) * 100 if past != 0 else 0.0
+
+            return (mom_1m, mom_3m)
+
         except Exception as e:
             logger.error(f"Could not fetch KOSPI momentum: {e}")
             return None, None
@@ -133,9 +138,7 @@ class MacroFetcher:
             vix_data = yf.Ticker('^VIX').history(start=as_of_date, end=end_date)
             if vix_data.empty:
                 raise ValueError("yfinance returned no VIX data")
-
-            return float(vix_data['Close'].iloc[0])
-            
+            return vix_data['Close'].iloc[0].item() # Use .item() for consistency
         except Exception as e:
             logger.error(f"Could not fetch VIX data: {e}")
             return None
