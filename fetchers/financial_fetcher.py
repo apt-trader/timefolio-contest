@@ -56,11 +56,14 @@ class FinancialsFetcher:
         self.api_key = api_key
         
         # Create docs_cache directory if it doesn't exist
-        cache_dir = Path(__file__).parent / 'docs_cache'
-        cache_dir.mkdir(exist_ok=True, parents=True)
+        self.cache_dir = Path(__file__).parent / 'docs_cache'
+        self.cache_dir.mkdir(exist_ok=True, parents=True)
         
-        # Initialize OpenDartReader with custom cache path
-        self.dart = OpenDartReader(self.api_key, cache_dir=str(cache_dir))
+        # Set environment variable for OpenDartReader cache
+        os.environ['OPENDART_CACHE_PATH'] = str(self.cache_dir)
+        
+        # Initialize OpenDartReader
+        self.dart = OpenDartReader(self.api_key)
         
         self.db_path = db_path
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
