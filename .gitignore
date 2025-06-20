@@ -16,7 +16,7 @@ logs/
 
 # Environment variables
 .env
-.envrc
+.direnv/
 
 # Data CSV files
 forbidden.csv
@@ -27,8 +27,8 @@ sector_universe.csv
 backup/
 
 # Cache and log directories
-docs_cache/
-krx_cache/
+fetchers/docs_cache/
+fetchers/krx_cache/
 logs/
 
 # System files
