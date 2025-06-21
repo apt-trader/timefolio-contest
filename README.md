@@ -31,7 +31,6 @@ A modular, professional-grade system for building, backtesting, and optimizing c
 
 The system is organized into distinct, decoupled modules.
 
-```
 /timefolio-2025
 ├── main.py                     # Main pipeline for a single-period run.
 ├── backtester.py               # Simulates strategy performance over time.
@@ -52,7 +51,6 @@ The system is organized into distinct, decoupled modules.
 │   └── config.yaml             # Central configuration file.
 |
 └── krx_data.db                 # Central SQLite Database
-```
 
 ---
 
