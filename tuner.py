@@ -5,6 +5,15 @@ import yaml
 from copy import deepcopy
 import argparse
 import os
+import sys
+from pathlib import Path
+
+# --- THIS IS THE CRITICAL FIX ---
+# Add the project root to the Python path to allow for absolute imports
+# This makes the script runnable from anywhere
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
+# --------------------------------
 
 from backtester import Backtester
 from config import Config
@@ -28,7 +37,9 @@ def objective(trial: optuna.Trial) -> float:
     trial_config['optimization']['l2_penalty'] = trial.suggest_float('l2_penalty', 0.05, 0.5, log=True)
     
     trial_config['factor_engine']['vol_window'] = trial.suggest_int('vol_window', 15, 40)
-    trial_config['factor_engine']['rsi_window'] = trial.suggest_int('rsi_window', 10, 20)
+    # The 'rsi_window' was removed as it's not part of the final advanced model
+    # Let's tune something more impactful, like the number of PCA components
+    trial_config['factor_engine']['n_pca_components'] = trial.suggest_int('n_pca_components', 3, 7)
     
     temp_config_path = f"config/temp_trial_{trial.number}.yaml"
     with open(temp_config_path, 'w') as f:
@@ -43,9 +54,9 @@ def objective(trial: optuna.Trial) -> float:
             end_date='2024-06-01', # Use a fixed period for fair comparison
             rebalance_freq='W-MON'
         )
-        backtest_summary = backtester.run()
+        # The backtester needs to return the summary dict to get the sharpe ratio
+        backtest_summary = backtester.run() 
         
-        # Clean up the temporary config file
         os.remove(temp_config_path)
 
         sharpe_ratio = backtest_summary.get('sharpe_ratio', -2.0) # Return a very low score on failure
@@ -54,7 +65,7 @@ def objective(trial: optuna.Trial) -> float:
         return sharpe_ratio
 
     except Exception as e:
-        logger.error(f"Trial #{trial.number} failed with an exception: {e}")
+        logger.error(f"Trial #{trial.number} failed with an exception: {e}", exc_info=True)
         if os.path.exists(temp_config_path):
             os.remove(temp_config_path)
         return -2.0
@@ -62,7 +73,7 @@ def objective(trial: optuna.Trial) -> float:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Hyperparameter tuner for the TimeFolio strategy.")
     parser.add_argument('-n', '--n-trials', type=int, default=50, help="Number of tuning trials to run.")
-    parser.add_argument('--study-name', default='timefolio-strategy-v1', help="Name for the Optuna study.")
+    parser.add_argument('--study-name', default='timefolio-strategy-v2', help="Name for the Optuna study.")
     parser.add_argument('--db-url', default='sqlite:///tuning_results.db', help="DB URL for Optuna results.")
     args = parser.parse_args()
 
@@ -73,7 +84,8 @@ if __name__ == '__main__':
         load_if_exists=True
     )
     
-    study.optimize(objective, n_trials=args.n_trials, n_jobs=-1) # Use all available CPU cores
+    # Using n_jobs > 1 can cause issues with file-based configs and SQLite, running sequentially is safer.
+    study.optimize(objective, n_trials=args.n_trials) 
     
     print("\n" + "="*50)
     print("           TUNING COMPLETE")
