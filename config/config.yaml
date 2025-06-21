@@ -1,5 +1,4 @@
 # config/config.yaml
-
 # ===================================================================
 #                    TimeFolio System Configuration
 # ===================================================================
@@ -36,7 +35,30 @@ risk_management:
 
 # --- Alpha Factor Calculation Settings ---
 factor_engine:
-  # Lookback windows (in trading days) for momentum calculations.
-  mom_windows: [20, 60, 120]           # Tunable
-  # Lookback window for volatility calculations.
-  vol_window: 25                       # Tunable
+  # Technical Factor lookback windows (in trading days)
+  mom_windows: [21, 63, 252]           # Tunable
+  vol_window: 21                       # Tunable
+  rsi_window: 14                       # Tunable
+
+  # --- PREDICTION MODEL SETTINGS ---
+  # This section controls the "Ferrari Engine".
+  
+  # prediction_model: Choose the model to generate the final alpha signal.
+  # 'pcr': Principal Component Regression. Robust, stable, and the recommended default.
+  # 'xgb': XGBoost. More powerful, but higher risk of overfitting. Requires extensive tuning.
+  prediction_model: 'pcr'
+  
+  # prediction_target_days: How many days into the future the model tries to predict.
+  prediction_target_days: 21           # Tunable
+  
+  # n_pca_components: Number of "meta-factors" for the PCR model to use.
+  n_pca_components: 5                  # Tunable
+  
+  # xgb_params: Hyperparameters for the XGBoost model. Only used if prediction_model is 'xgb'.
+  # These are placeholders and MUST be tuned with tuner.py if you use this model.
+  xgb_params:
+    n_estimators: 100
+    learning_rate: 0.1
+    max_depth: 3
+    subsample: 0.8
+    colsample_bytree: 0.8
