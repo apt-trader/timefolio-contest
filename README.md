@@ -31,6 +31,7 @@ A modular, professional-grade system for building, backtesting, and optimizing c
 
 The system is organized into distinct, decoupled modules.
 
+```
 /timefolio-2025
 ├── main.py                     # Main pipeline for a single-period run.
 ├── backtester.py               # Simulates strategy performance over time.
@@ -42,7 +43,7 @@ The system is organized into distinct, decoupled modules.
 ├── risk_monitor.py             # Post-trade risk analysis and reporting.
 |
 ├── fetchers/                   # Modules for fetching external data.
-│   ├── **init**.py
+│   ├── __init__.py
 │   ├── krx_fetcher.py          # Market data (OHLCV, Market Cap)
 │   ├── financial_fetcher.py    # Fundamental data (DART)
 │   └── macro_fetcher.py        # Macroeconomic data (FRED, yfinance)
@@ -51,6 +52,7 @@ The system is organized into distinct, decoupled modules.
 │   └── config.yaml             # Central configuration file.
 |
 └── krx_data.db                 # Central SQLite Database
+```
 
 ---
 
