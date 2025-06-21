@@ -20,8 +20,9 @@ A modular, professional-grade system for building, backtesting, and optimizing c
 ## Key Features
 
 - **Robust Data Fetchers**: Modules for KRX (prices), DART (fundamentals), and FRED/yfinance (macro data), with built-in rate limiting and error handling.
-- **Advanced Factor Engine**: Computes a sophisticated alpha signal from a composite of **Momentum**, **Value**, **Quality**, and **Macro-Regime** factors.
-- **`CVXPY`-based Optimizer**: Enforces all constraints (weight, cardinality, sector, small-cap) in a single, powerful mixed-integer solver.
+- **Advanced Factor Engine**: Computes a suite of advanced alpha factors (Multi-dimensional Momentum, Robust Value, Deeper Quality, Investment).
+- **Machine Learning Alpha Model**: Employs a **Principal Component Regression (PCR)** model to intelligently learn from historical data and combine all factors into a single, powerful predictive signal.
+- **`CVXPY`-based Optimizer**: Enforces all constraints (weight, cardinality, sector, etc.) in a single, powerful mixed-integer solver.
 - **Scientific Backtesting**: Simulates historical strategy performance with key metrics like Sharpe Ratio and Maximum Drawdown.
 - **Automated Tuning**: Uses `Optuna` to discover the optimal strategy hyperparameters automatically.
 
@@ -137,7 +138,8 @@ python -m fetchers.financial_fetcher --all -s 2022 -e 2022
 This may take several hours. Results are saved in `tuning_results.db`.
 
 ```bash
-python tuner.py --n-trials 100 --study-name "tuning-v1"
+# A strong, professional recommendation
+python tuner.py --n-trials 300 --study-name "final-model-tuning-v1"
 ```
 
 After the run, copy the "Best Parameters" from the output into your `config.yaml`.
@@ -162,7 +164,9 @@ python main.py --output-dir output/
 
 ## Technical Framework
 
-- **Alpha Model**: A multi-factor model combining **Momentum**, **Value**, **Quality**, **Profitability**, and **Macro Regime** signals. Factors are intelligently weighted based on the macro environment.
+- **Alpha Model**: A machine-learning-driven multi-factor model.
+  - **Factor Library**: Momentum, Value, Quality, Profitability, Investment, and Low Volatility.
+  - **Signal Generation**: A **Principal Component Regression (PCR)** model is trained on historical factor data to predict forward returns. This approach reduces noise and captures the most significant drivers of alpha. The final signal is dynamically tilted based on a macro regime indicator (the 10y-2y yield spread).
 - **Portfolio Construction**: Mean-Variance Optimization with L2 regularization and mixed-integer constraints.
   - `Objective: max  μ'w - λ·w'Σw - η·||w||₂²`
 - **Constraints Enforced in Solver**:
@@ -171,7 +175,7 @@ python main.py --output-dir output/
   - Weight Limits: `0.01 ≤ w_i ≤ 0.15`
   - Sector Exposure: Dynamic limits based on `market_sectors.csv`.
   - Small-Cap Limit: `Σw_small_cap ≤ 0.40`.
-- **Risk Management**: Post-optimization analysis via `RiskMonitor` checks HHI, MDD, and weekly turnover to ensure compliance.
+- **Risk Management**: Post-optimization analysis via `RiskMonitor` checks HHI for weight and return concentration, MDD, and weekly turnover to ensure compliance.
 
 ---
 
