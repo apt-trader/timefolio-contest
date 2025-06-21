@@ -7,199 +7,171 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LinearRegression
 import xgboost as xgb
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
 class FactorEngine:
     def __init__(self, settings: Dict):
         self.settings = settings
-        self.mom_windows = settings.get('mom_windows', [21, 63, 252]) # Use business days
+        self.mom_windows = settings.get('mom_windows', [21, 63, 252])
         self.vol_window = settings.get('vol_window', 21)
         self.rsi_window = settings.get('rsi_window', 14)
-        logger.info(f"FactorEngine initialized.")
+        self.prediction_model_type = settings.get('prediction_model', 'pcr')
+        self.n_pca_components = settings.get('n_pca_components', 5)
+        self.xgb_params = settings.get('xgb_params', {})
+        self.prediction_target_days = settings.get('prediction_target_days', 21)
+        logger.info(f"FactorEngine initialized. Prediction model: {self.prediction_model_type.upper()}")
 
     def _cross_sectional_rank(self, series: pd.Series) -> pd.Series:
-        """Ranks data cross-sectionally and scales it from -1 to 1."""
-        return series.rank(pct=True).sub(0.5).mul(2).fillna(0)
+        """Ranks data cross-sectionally from -1 to 1."""
+        return series.rank(pct=True).sub(0.5).mul(2)
 
-    def calculate_all_factors(self,
-                              prices: pd.DataFrame,
-                              volumes: pd.DataFrame,
-                              market_index: pd.Series,
-                              fundamental_data: pd.DataFrame,
-                              market_caps: pd.Series,
-                              macro_data: pd.DataFrame) -> pd.DataFrame:
-        """Main entry point to calculate and combine all factors."""
-        logger.info("Starting calculation of all factor types.")
+    def calculate_all_factors(self, prices: pd.DataFrame, volumes: pd.DataFrame,
+                              market_caps: pd.DataFrame,
+                              fundamental_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """
+        Calculates all factors in a point-in-time (PIT) manner for the entire history.
+        This is computationally intensive and designed to create a training set for the ML model.
+        """
+        logger.info("Calculating all historical factors for model training...")
         returns = prices.pct_change()
+        all_factors_list = []
         
-        # --- The 'Momentum' key now calls the new composite function ---
-        factors = {
-            'Momentum': self._calculate_momentum_factors(prices), # UPGRADED
-            'Reversion': self._calculate_mean_reversion(prices),
-            'Liquidity': self._calculate_liquidity(prices, volumes),
-            'Low_Beta': self._calculate_beta(returns, market_index),
-            'Value': self._calculate_value_factors(fundamental_data, market_caps),
-            'Quality': self._calculate_quality_factors(fundamental_data),
-            'Profitability': self._calculate_profitability_factors(fundamental_data),
-            'Macro_Regime': self._calculate_macro_regime_factor(macro_data)
-        }
+        # We need at least one year of data to calculate factors
+        for i in tqdm(range(252, len(prices)), desc="Calculating Historical Factors"):
+            current_date = prices.index[i]
+            
+            # --- Point-in-Time Data Slicing ---
+            prices_slice = prices.iloc[:i+1]
+            volumes_slice = volumes.iloc[:i+1]
+            returns_slice = returns.iloc[:i+1]
+            market_caps_slice = market_caps.loc[current_date]
+            
+            # Find the latest fundamental data available *as of this date*
+            # This is the core of a true point-in-time backtest
+            pit_fundamentals_list = []
+            for ticker in prices.columns:
+                if ticker_df := fundamental_data.get(ticker):
+                    # Find the latest report date <= current date
+                    latest_pit_report = ticker_df[ticker_df.index <= current_date]
+                    if not latest_pit_report.empty:
+                        pit_fundamentals_list.append(latest_pit_report.iloc[-1])
+            
+            if not pit_fundamentals_list: continue
+            
+            pit_fundamentals_df = pd.DataFrame(pit_fundamentals_list)
+            
+            # --- Factor Calculation for this single day ---
+            factors = {
+                'Momentum': self._calculate_momentum_factors(prices_slice),
+                'Value': self._calculate_value_factors(pit_fundamentals_df, market_caps_slice),
+                'Quality': self._calculate_quality_factors(pit_fundamentals_df),
+                'Investment': self._calculate_investment_factor(pit_fundamentals_df),
+                'Profitability': self._calculate_profitability_factors(pit_fundamentals_df),
+                'Low_Beta': self._calculate_beta(returns_slice, prices_slice.mean(axis=1)),
+            }
+            daily_factors = pd.DataFrame(factors).fillna(0)
+            daily_factors['date'] = current_date
+            all_factors_list.append(daily_factors)
 
-        combined_factors = pd.DataFrame(factors).dropna(axis=1, how='all')
-        
-        if 'Macro_Regime' in combined_factors.columns:
-            macro_signal = combined_factors['Macro_Regime'].iloc[0]
-            combined_factors['Macro_Regime'] = macro_signal
-        
-        logger.info(f"Factor calculation complete. {len(combined_factors.columns)} factors calculated for {len(combined_factors)} tickers.")
-        return combined_factors.fillna(0)
+        if not all_factors_list:
+            logger.error("Could not generate any historical factors.")
+            return pd.DataFrame()
 
-    # --- UPGRADED MOMENTUM METHOD ---
+        # Combine all daily factor dataframes into one large dataframe
+        return pd.concat(all_factors_list).reset_index().rename(columns={'index':'ticker'}).set_index(['date', 'ticker'])
+
+    # --- Factor Calculation Methods ---
     def _calculate_momentum_factors(self, prices: pd.DataFrame) -> pd.Series:
-        """
-        Calculates a robust, composite momentum factor from multiple signals.
-        1. Short-Term Reversal (1-Month): Negative signal.
-        2. Classic Momentum (12-Month): Positive signal.
-        3. Momentum Acceleration: Change in the 12-month momentum.
-        """
-        logger.debug("Calculating multi-dimensional momentum factor.")
-        
-        # Ensure we have enough data
-        if len(prices) < 252 + 63: # 1 year + 3 months
-            logger.warning("Not enough price data for full momentum calculation. Skipping.")
-            return pd.Series(0, index=prices.columns)
-
-        # 1. Short-Term Reversal (1-Month)
-        # We rank this negatively because we want to bet against recent winners.
-        reversal_1m = prices.pct_change(self.mom_windows[0]).iloc[-1]
-        reversal_signal = self._cross_sectional_rank(-reversal_1m)
-
-        # 2. Classic Momentum (12-Month)
-        momentum_12m = prices.pct_change(self.mom_windows[2]).iloc[-1]
-        momentum_signal = self._cross_sectional_rank(momentum_12m)
-        
-        # 3. Momentum Acceleration
-        # Calculate 12-month momentum series over the last 3 months
-        momentum_12m_series = prices.pct_change(self.mom_windows[2]).rolling(window=self.mom_windows[1]).mean()
-        # The 'acceleration' is the slope of this series. We use a simple diff as a proxy.
-        acceleration = momentum_12m_series.iloc[-1] - momentum_12m_series.iloc[-2]
-        acceleration_signal = self._cross_sectional_rank(acceleration)
-
-        # Combine the signals. The weights are a strategic choice.
-        # Here, we give most importance to the classic trend, followed by its acceleration.
-        # The reversal signal is used as a small hedge against momentum crashes.
-        composite_momentum = (
-            momentum_signal * 0.50 +
-            acceleration_signal * 0.35 +
-            reversal_signal * 0.15
-        )
-        
-        return self._cross_sectional_rank(composite_momentum)
-
-    # def _calculate_vol_adj_momentum(self, prices, returns):
-    #     vol = returns.rolling(self.vol_window).std()
-    #     mom = prices.pct_change(self.mom_windows[-1]) # Use longest window for signal
-    #     adj_mom = mom.iloc[-1] / (vol.iloc[-1] + 1e-6)
-    #     return self._cross_sectional_rank(adj_mom)
-
-    def _calculate_mean_reversion(self, prices):
-        delta = prices.diff()
-        gain = delta.where(delta > 0, 0).rolling(self.rsi_window).mean()
-        loss = -delta.where(delta < 0, 0).rolling(self.rsi_window).mean()
-        # Ensure loss is not zero to avoid division by zero
-        rs = gain.iloc[-1] / (loss.iloc[-1] + 1e-8)
-        rsi = 100 - (100 / (1 + rs))
-        return self._cross_sectional_rank(-rsi) # Lower RSI is a buy signal
-
-    def _calculate_liquidity(self, prices, volumes):
-        avg_daily_value = (prices * volumes).rolling(20).mean()
-        return self._cross_sectional_rank(avg_daily_value.iloc[-1])
-        
-    def _calculate_beta(self, returns, market_index):
-        if market_index.empty: return pd.Series(0, index=returns.columns)
-        market_returns = market_index.pct_change().dropna()
-        # Align returns with market returns
-        aligned_returns, aligned_market = returns.align(market_returns, join='inner', axis=0)
-        if len(aligned_returns) < 60: return pd.Series(0, index=returns.columns)
-        
-        rolling_cov = aligned_returns.rolling(60).cov(aligned_market)
-        beta = rolling_cov / (aligned_market.rolling(60).var() + 1e-8)
-        return self._cross_sectional_rank(-beta.iloc[-1]) # Lower beta is better
+        if len(prices) < 252 + 63: return pd.Series(0, index=prices.columns)
+        reversal_1m = self._cross_sectional_rank(-prices.pct_change(self.mom_windows[0]).iloc[-1])
+        momentum_12m = self._cross_sectional_rank(prices.pct_change(self.mom_windows[2]).iloc[-1])
+        accel_series = prices.pct_change(self.mom_windows[2]).rolling(self.mom_windows[1]).mean()
+        acceleration = self._cross_sectional_rank(accel_series.iloc[-1] - accel_series.iloc[-2])
+        return self._cross_sectional_rank(momentum_12m * 0.5 + acceleration * 0.35 + reversal_1m * 0.15)
 
     def _calculate_value_factors(self, fundamental_data: pd.DataFrame, market_caps: pd.Series) -> pd.Series:
-        """
-        Calculates a composite value factor from BPR, EPR, PSR, and CF/P.
-        """
-        logger.debug("Calculating robust composite value factor.")
-        if fundamental_data.empty or market_caps.empty:
-            logger.warning("Fundamental data or market caps are empty. Skipping value factor.")
-            return pd.Series()
-
-        # Join with market caps to get a per-stock price proxy
+        if fundamental_data.empty: return pd.Series()
         data = fundamental_data.join(market_caps.rename('MarketCap'), how='inner')
-        if 'MarketCap' not in data.columns or data['MarketCap'].isna().all():
+        if 'MarketCap' not in data or data['MarketCap'].le(0).all(): return pd.Series()
+        data = data[data['MarketCap'] > 0].copy()
+        ratios = pd.DataFrame({
+            'BPR': data.get('Equity', 0) / data['MarketCap'], 'EPR': data.get('NetIncome', 0) / data['MarketCap'],
+            'SPR': data.get('Sales', 0) / data['MarketCap'], 'CFPR': data.get('OperatingCF', 0) / data['MarketCap']
+        }).replace([np.inf,-np.inf], 0).fillna(0)
+        return self._cross_sectional_rank(ratios.apply(self._cross_sectional_rank, axis=0).sum(axis=1))
+
+    def _calculate_quality_factors(self, fundamental_data: pd.DataFrame) -> pd.Series:
+        if fundamental_data.empty: return pd.Series()
+        data = fundamental_data.copy()
+        data['ROE'] = data.get('NetIncome') / data.get('Equity')
+        data['Leverage'] = data.get('Liabilities') / data.get('Assets')
+        # Note: ROE stability is too complex for this simplified PIT loop and would be pre-calculated
+        # in a more advanced system. We use the core ROE and Leverage here.
+        return self._cross_sectional_rank(data['ROE']) - self._cross_sectional_rank(data['Leverage'])
+
+    def _calculate_investment_factor(self, fundamental_data: pd.DataFrame) -> pd.Series:
+        if 'Assets' not in fundamental_data.columns or 'Assets_PY' not in fundamental_data.columns:
             return pd.Series()
-        
-        # Calculate the four value ratios (Yields). Higher is better.
-        # Use .get() to safely access columns that might be missing for some stocks
-        data['BPR'] = data.get('Equity', 0) / data['MarketCap']
-        data['EPR'] = data.get('NetIncome', 0) / data['MarketCap']
-        data['SPR'] = data.get('Sales', 0) / data['MarketCap'] # Sales-to-Price Ratio
-        data['CFPR'] = data.get('OperatingCF', 0) / data['MarketCap'] # CashFlow-to-Price Ratio
+        # Asset growth requires previous year's assets, which a proper PIT data fetch would provide.
+        # This assumes the data manager provides a column 'Assets_PY'
+        asset_growth = (fundamental_data['Assets'] / fundamental_data['Assets_PY']) - 1
+        return self._cross_sectional_rank(-asset_growth) # Lower growth is better
 
-        # Rank each factor individually. This normalizes their scales.
-        bpr_rank = self._cross_sectional_rank(data['BPR'])
-        epr_rank = self._cross_sectional_rank(data['EPR'])
-        spr_rank = self._cross_sectional_rank(data['SPR'])
-        cfpr_rank = self._cross_sectional_rank(data['CFPR'])
-        
-        # Combine the ranked factors into a single composite score
-        # We can assign different weights if we have a view on which is more important
-        composite_value = bpr_rank + epr_rank + spr_rank + cfpr_rank
-        
-        return self._cross_sectional_rank(composite_value)
+    def _calculate_profitability_factors(self, fundamental_data: pd.DataFrame) -> pd.Series:
+        if 'GrossProfit' not in fundamental_data or 'Assets' not in fundamental_data: return pd.Series()
+        return self._cross_sectional_rank(fundamental_data['GrossProfit'] / fundamental_data['Assets'])
 
-    def _calculate_quality_factors(self, fundamental_data):
-        if fundamental_data.empty: return pd.Series()
-        data = fundamental_data.copy()
-        data['ROE'] = data['NetIncome'] / data['Equity']
-        data['Leverage'] = data['Liabilities'] / data['Assets']
-        return self._cross_sectional_rank(data['ROE']) + self._cross_sectional_rank(-data['Leverage'])
+    def _calculate_beta(self, returns: pd.DataFrame, market_index: pd.Series) -> pd.Series:
+        aligned_returns, aligned_market = returns.align(market_index.pct_change().dropna(), join='inner', axis=0)
+        if len(aligned_returns) < 60: return pd.Series(0, index=returns.columns)
+        rolling_cov = aligned_returns.rolling(60).cov(aligned_market)
+        beta = rolling_cov / (aligned_market.rolling(60).var() + 1e-8)
+        return self._cross_sectional_rank(-beta.iloc[-1])
+    
+    def _calculate_liquidity(self, prices, volumes):
+        return self._cross_sectional_rank((prices * volumes).rolling(20).mean().iloc[-1])
 
-    def _calculate_profitability_factors(self, fundamental_data):
-        if fundamental_data.empty: return pd.Series()
-        data = fundamental_data.copy()
-        data['GrossProfitability'] = data['GrossProfit'] / data['Assets']
-        return self._cross_sectional_rank(data['GrossProfitability'])
+    def predict_returns(self, factors: pd.DataFrame, returns: pd.DataFrame) -> pd.Series:
+        """
+        Trains a model on historical data to predict future returns from the latest factors.
+        """
+        logger.info(f"Training predictive model ({self.prediction_model_type.upper()}) to generate alpha signal...")
         
-    def _calculate_macro_regime_factor(self, macro_data):
-        if macro_data.empty or 'us10y2y' not in macro_data.columns or macro_data['us10y2y'].isna().all():
-            logger.warning("Macro data is unavailable. Defaulting to neutral regime (0).")
-            return pd.Series({'Macro_Regime': 0})
+        y = returns.shift(-self.prediction_target_days).rolling(self.prediction_target_days).sum().stack()
         
-        yield_spread = macro_data['us10y2y'].iloc[0]
-        macro_signal = 1 if yield_spread > 0.001 else -1 # Risk-on vs Risk-off
-        logger.info(f"Macro Regime (10y-2y spread: {yield_spread:.3f}): {'Risk-On' if macro_signal > 0 else 'Risk-Off'}")
-        return pd.Series({'Macro_Regime': macro_signal})
+        # Align factors (X) and target (y)
+        training_data = factors.join(y.rename('forward_return')).dropna()
+        if training_data.empty:
+            logger.error("No training data available after aligning factors and forward returns.")
+            return pd.Series()
 
-    # --- Prediction Model ---
-    def predict_returns(self, factors: pd.DataFrame) -> pd.Series:
-        """Combines all factors into a final alpha signal."""
-        logger.info("Combining factors into a final alpha signal.")
-        if 'Macro_Regime' in factors.columns:
-            macro_signal = factors['Macro_Regime'].iloc[0]
-            risk_off_weights = {'Value': 0.2, 'Quality': 0.4, 'Low_Beta': 0.4, 'Momentum': 0.0, 'Reversion': 0.0}
-            risk_on_weights = {'Value': 0.2, 'Quality': 0.2, 'Low_Beta': 0.0, 'Momentum': 0.4, 'Reversion': 0.2}
+        X_train = training_data.drop(columns='forward_return')
+        y_train = training_data['forward_return']
+        
+        X_latest = factors.loc[factors.index.get_level_values('date') == factors.index.get_level_values('date').max()]
+
+        # MODEL SELECTION LOGIC
+        if self.prediction_model_type == 'xgb':
+            logger.info("Using XGBoost Regressor.")
+            model = xgb.XGBRegressor(objective='reg:squarederror', **self.xgb_params, n_jobs=-1)
+            model.fit(X_train, y_train)
+            predictions = model.predict(X_latest)
+        else: # Default to PCR
+            logger.info("Using Principal Component Regression (PCR).")
+            scaler = StandardScaler()
+            pca = PCA(n_components=self.n_pca_components)
+            model = LinearRegression()
             
-            weights = risk_off_weights if macro_signal < 0 else risk_on_weights
-            
-            factor_cols = [col for col in ['Momentum', 'Reversion', 'Low_Beta', 'Value', 'Quality'] if col in factors.columns]
-            
-            weighted_factors = pd.Series(0.0, index=factors.index)
-            for factor, weight in weights.items():
-                if factor in factor_cols and weight > 0:
-                    weighted_factors += factors[factor] * weight
-            
-            return weighted_factors
-        else:
-            return factors.mean(axis=1)
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_train_pca = pca.fit_transform(X_train_scaled)
+            model.fit(X_train_pca, y_train)
+
+            X_latest_scaled = scaler.transform(X_latest)
+            X_latest_pca = pca.transform(X_latest_scaled)
+            predictions = model.predict(X_latest_pca)
+        
+        alpha_signal = pd.Series(predictions, index=X_latest.index.get_level_values('ticker'))
+        logger.info("Successfully generated final alpha signal from trained model.")
+        return self._cross_sectional_rank(alpha_signal)
