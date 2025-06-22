@@ -28,7 +28,7 @@ if not FRED_API_KEY:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).parent.parent / "krx_data.db"
+DB_PATH = Path(__file__).parent.parent / "db" / "krx_data.db"
 
 def rate_limited(max_per_second: float):
     """Decorator to limit function calls per second."""

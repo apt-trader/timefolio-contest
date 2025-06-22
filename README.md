@@ -106,7 +106,7 @@ data_settings:
   # Paths are relative to the project root
   stock_universe_file: "sector_universe.csv"
   market_sectors_file: "market_sectors.csv"
-  db_path: "krx_data.db"
+  db_path: "db/krx_data.db"
 ```
 
 ---

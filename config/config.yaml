@@ -11,7 +11,7 @@ data_settings:
   # Paths are relative to the project root (timefolio-2025-main/)
   stock_universe_file: "sector_universe.csv"
   market_sectors_file: "market_sectors.csv"
-  db_path: "krx_data.db"
+  db_path: "db/krx_data.db"
   
   # Global date range for backtesting and analysis.
   # It is recommended to use at least 3-4 years of data.

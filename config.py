@@ -38,7 +38,7 @@ class Config:
         data_settings = self._raw_config.get('data_settings', {})
         self.stock_universe_file: str = data_settings.get('stock_universe_file', 'data/sector_universe.csv')
         self.market_sectors_file: str = data_settings.get('market_sectors_file', 'data/market_sectors.csv')
-        self.db_path: str = data_settings.get('db_path', 'krx_data.db')
+        self.db_path: str = data_settings.get('db_path', 'db/krx_data.db')
         self.start_date: str = data_settings.get('start_date', '2022-01-01')
         self.end_date: str = data_settings.get('end_date', '2025-09-30')
 

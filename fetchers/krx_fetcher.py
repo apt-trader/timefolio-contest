@@ -44,7 +44,7 @@ class KRXDataFetcher:
     """
     A class to fetch and manage KRX market data using the OTP-based download system.
     """
-    def __init__(self, cache_dir: str = None, db_path: str = str(Path(__file__).parent.parent / "krx_data.db"), 
+    def __init__(self, cache_dir: str = None, db_path: str = str(Path(__file__).parent.parent / "db" / "krx_data.db"), 
                  throttle: float = 0.5, max_retries: int = 3):
         if cache_dir is None:
             self.cache_dir = Path(__file__).parent / 'krx_cache'

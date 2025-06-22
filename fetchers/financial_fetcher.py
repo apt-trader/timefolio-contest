@@ -41,7 +41,7 @@ class RateLimiter:
         self.calls_minute.append(time.time()); self.calls_day.append(time.time())
 
 class FinancialsFetcher:
-    def __init__(self, api_key: str, db_path: str = str(Path(__file__).parent.parent / "krx_data.db")):
+    def __init__(self, api_key: str, db_path: str = str(Path(__file__).parent.parent / "db" / "krx_data.db")):
         if not api_key: raise ValueError("DART API key is required.")
         self.api_key = api_key
         self.cache_dir = Path(__file__).parent / 'docs_cache'
