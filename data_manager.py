@@ -1,8 +1,8 @@
 # data_manager.py
 import logging
+import sqlite3
 import pandas as pd
 from datetime import datetime
-import sqlite3
 from typing import Dict, List, Tuple
 import os
 from config import Config
@@ -17,11 +17,35 @@ class DataManager:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.db_path = cfg.db_path
+        self._apply_db_optimizations()
         self._krx = KRXFetcher(db_path=self.db_path)
         self._fin = FinancialsFetcher(api_key=os.getenv('DART_API_KEY'), db_path=self.db_path)
         self._macro = MacroFetcher(fred_api_key=os.getenv('FRED_API_KEY'))
         self.tickers, self.sector_map = self._initialize_universe()
         logger.info(f"DataManager initialized with {len(self.tickers)} compliant tickers.")
+
+    def _apply_db_optimizations(self):
+        """Applies recommended PRAGMA settings for read-heavy performance."""
+        logger.info("Applying database performance optimizations...")
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # 1. Enable WAL mode (Most important for concurrency)
+                conn.execute("PRAGMA journal_mode=WAL;")
+                # 2. Increase cache size (e.g., to ~80MB)
+                conn.execute("PRAGMA cache_size = -20000;")
+                # 3. Set synchronous to NORMAL (Safe with WAL)
+                conn.execute("PRAGMA synchronous = NORMAL;")
+                # 4. Use memory for temporary storage
+                conn.execute("PRAGMA temp_store = MEMORY;")
+                # 5. Create new, optimized indexes if they don't exist
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_prices_date_code ON daily_prices(date, code);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_financials_account_id ON financials(account_id);")
+                # 6. Run ANALYZE to update statistics for the query planner
+                logger.info("Running ANALYZE to update query planner statistics...")
+                conn.execute("ANALYZE;")
+                logger.info("Database optimizations successfully applied.")
+        except sqlite3.Error as e:
+            logger.error(f"Failed to apply database optimizations: {e}")
 
     def _get_universe_at_date(self, date_str: str) -> pd.DataFrame:
         """Gets all tickers that were actively traded on a specific date from our own database."""
