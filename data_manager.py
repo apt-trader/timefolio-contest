@@ -17,6 +17,8 @@ class DataManager:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.db_path = cfg.db_path
+        self._initial_db_size = self._get_db_size()
+        self._last_vacuum_size = self._initial_db_size
         self._apply_db_optimizations()
         self._krx = KRXFetcher(db_path=self.db_path)
         self._fin = FinancialsFetcher(api_key=os.getenv('DART_API_KEY'), db_path=self.db_path)
@@ -24,26 +26,66 @@ class DataManager:
         self.tickers, self.sector_map = self._initialize_universe()
         logger.info(f"DataManager initialized with {len(self.tickers)} compliant tickers.")
 
-    def _apply_db_optimizations(self):
-        """Applies recommended PRAGMA settings for read-heavy performance."""
+    def _get_db_size(self) -> int:
+        """Get current database file size in bytes."""
+        try:
+            return os.path.getsize(self.db_path)
+        except OSError:
+            return 0
+
+    def _check_vacuum_needed(self) -> bool:
+        """Check if VACUUM is needed based on file size growth."""
+        current_size = self._get_db_size()
+        if current_size == 0:
+            return False
+            
+        # Calculate size growth since last VACUUM
+        size_growth = current_size - self._last_vacuum_size
+        growth_percentage = (size_growth / self._last_vacuum_size) * 100
+        
+        # VACUUM if growth > 10% of last vacuum size
+        if growth_percentage > 10:
+            logger.info(
+                f"Database size grew by {growth_percentage:.2f}% since last VACUUM "
+                f"({size_growth/1024/1024:.2f}MB). Running optimization..."
+            )
+            return True
+        return False
+    
+    def _apply_db_optimizations(self, run_vacuum: bool = None):
+        """Applies recommended PRAGMA settings for read-heavy performance.
+    
+        Args:
+            run_vacuum: If True, runs VACUUM to optimize the database file.
+                        Warning: This is a blocking operation and should be used sparingly.
+        """
+        if run_vacuum is None:
+            run_vacuum = self._check_vacuum_needed()
+        
         logger.info("Applying database performance optimizations...")
         try:
             with sqlite3.connect(self.db_path) as conn:
                 # 1. Enable WAL mode (Most important for concurrency)
                 conn.execute("PRAGMA journal_mode=WAL;")
                 # 2. Increase cache size (e.g., to ~80MB)
-                conn.execute("PRAGMA cache_size = -20000;")
+                conn.execute("PRAGMA cache_size = -80000;")
                 # 3. Set synchronous to NORMAL (Safe with WAL)
                 conn.execute("PRAGMA synchronous = NORMAL;")
                 # 4. Use memory for temporary storage
                 conn.execute("PRAGMA temp_store = MEMORY;")
-                # 5. Create new, optimized indexes if they don't exist
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_prices_date_code ON daily_prices(date, code);")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_financials_account_id ON financials(account_id);")
-                # 6. Run ANALYZE to update statistics for the query planner
+                # 5. Run ANALYZE to update statistics for the query planner
                 logger.info("Running ANALYZE to update query planner statistics...")
                 conn.execute("ANALYZE;")
-                logger.info("Database optimizations successfully applied.")
+                # 6. Optional: Run VACUUM if explicitly requested
+                
+                if run_vacuum:
+                    logger.warning("Running VACUUM - this may take a while and block other operations...")
+                    conn.execute("VACUUM;")
+                    self._last_vacuum_size = self._get_db_size()
+                    logger.info("VACUUM completed successfully.")
+                    
+
+            logger.info("Database optimizations successfully applied.")
         except sqlite3.Error as e:
             logger.error(f"Failed to apply database optimizations: {e}")
 
