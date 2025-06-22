@@ -139,7 +139,7 @@ This may take several hours. Results are saved in `tuning_results.db`.
 
 ```bash
 # A strong, professional recommendation
-python tuner.py --n-trials 300 --study-name "final-model-tuning-v1"
+python tuner.py --n-trials 200 --study-name "final-model-tuning-v1"
 ```
 
 After the run, copy the "Best Parameters" from the output into your `config.yaml`.
