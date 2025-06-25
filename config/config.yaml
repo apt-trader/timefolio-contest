@@ -1,0 +1,69 @@
+# config/config.yaml
+# --- Data and Date Settings ---
+data_settings:
+  # Paths are relative to the project root (timefolio-2025-main/)
+  stock_universe_file: "sector_universe.csv"
+  market_sectors_file: "market_sectors.csv"
+  db_path: "db/krx_data.db"
+  
+  # Global date range for backtesting and analysis.
+  # It is recommended to use at least 3-4 years of data.
+  start_date: '2020-01-01'
+  end_date: '2025-06-24'
+
+# --- Model Training Settings ---
+training_settings:
+  start_date: '2020-01-01'
+  end_date: '2024-12-31'
+  rebalance_frequency: 'M'      # Frequency for recalculating factors during training (M=Month-end)
+  forward_return_period: 21     # Horizon for forward returns used as prediction target (in trading days)
+
+# --- Portfolio Optimization Parameters ---
+optimization_settings:
+  max_positions: 10           # Cardinality constraint (max number of stocks)
+  individual_limit: 0.35      # Max weight for any single stock
+  min_weight: 0.01            # Min weight for any single stock
+  risk_aversion: 1.25         # Tunable: How much to penalize risk. Higher = more conservative portfolio.
+  l2_penalty: 0.2             # Tunable: Regularization to prevent overfitting and encourage diversification.
+
+# --- Risk Monitoring Settings ---
+risk_settings:
+  hhi_concentration_threshold: 1800  # Herfindahl-Hirschman Index threshold for flagging high concentration.
+  turnover_limit: 0.80               # Maximum allowable portfolio turnover between rebalances.
+  mdd_warning_level: -0.25           # MDD level at which to generate a warning (-25%).
+
+# --- Contest Period Risk Management Rules ---
+risk_management:
+  min_avg_daily_value: 3000000000      # Min avg 5-day trading value (in KRW) to ensure liquidity.
+  min_ipo_days: 90                     # Stock must be listed for at least 90 days.
+  small_cap_threshold: 1000000000000   # 1 Trillion KRW. Stocks below this are 'small-cap'.
+  max_small_cap_weight: 0.50           # Max total portfolio weight allocated to small-cap stocks.
+
+# --- Alpha Factor Calculation Settings ---
+factor_settings:
+  # --- Time Windows for Factor Calculations ---
+  # Momentum windows (exactly 3 required)
+  mom_windows: [21, 63, 252]           # Short, medium, and long-term momentum windows
+  
+  # Reversal windows (for short-term reversal factors)
+  short_term_reversal_windows: [5]     # Windows for short-term reversal factors
+  
+  # Volatility settings
+  vol_window: 21                       # Primary volatility calculation window
+  vol_windows: [21, 63, 126, 252]      # Multiple windows for volatility features
+  ivol_lookback: 252                   # Lookback period for IVOL calculation (trading days)
+  
+  # Volume settings
+  volume_ma_window: 63                 # Window for volume moving average
+  volume_dry_up_window: 21             # Lookback window for volume dry-up detection
+  rsi_window: 14                       # RSI calculation window
+  
+  # --- Model Configuration ---
+  n_pca_components: 5                  # Number of principal components for PCR
+  prediction_target_days: 21           # Forecast horizon for return predictions
+  n_folds: 5                           # Number of cross-validation folds
+  
+  # Feature Analysis
+  feature_importance:
+    n_top_features: 10                  # Number of top features to log
+    importance_method: 'permutation'    # Method: 'permutation' or 'coef'
