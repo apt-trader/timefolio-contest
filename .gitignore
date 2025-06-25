@@ -1,0 +1,49 @@
+# venv and caches
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+#init files
+__init__.py
+fetchers/__init__.py
+
+# VS Code
+.vscode/
+
+# data folders and files
+db/
+cache/
+output/
+test/
+logs/
+
+# Environment variables
+.env
+.envrc
+.direnv/
+
+# Data CSV files
+forbidden.csv
+market_sectors.csv
+sector_universe.csv
+
+# Exclude backup directory
+backup/
+
+# Cache and log directories
+fetchers/docs_cache/
+fetchers/krx_cache/
+
+# System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Description files
+.windsurf/
+contest-checklists.md
+contest-weekly-scheme.md
+FAQ.md
