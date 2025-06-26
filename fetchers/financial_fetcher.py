@@ -38,11 +38,14 @@ from tqdm import tqdm
 
 load_dotenv()
 # Configure logging
+logs_dir = Path(__file__).parent.parent / 'logs'
+logs_dir.mkdir(exist_ok=True, parents=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('financial_fetcher.log'),
+        logging.FileHandler(logs_dir / 'financial_fetcher.log'),
         logging.StreamHandler()
     ]
 )
