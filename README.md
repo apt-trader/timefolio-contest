@@ -139,7 +139,7 @@ This may take several hours. Results are saved in `tuning_results.db`.
 
 ```bash
 # A strong, professional recommendation
-python tuner.py --n-trials 300 --study-name "final-model-tuning-v1"
+python tuner.py --n-trials 300 --study-name "final-model-tuning-v1" --list-trials
 ```
 
 After the run, copy the "Best Parameters" from the output into your `config.yaml`.
@@ -165,8 +165,13 @@ python main.py --output-dir output/
 ## Technical Framework
 
 - **Alpha Model**: A machine-learning-driven multi-factor model.
-  - **Factor Library**: Momentum, Value, Quality, Profitability, Investment, and Low Volatility.
-  - **Signal Generation**: A **Principal Component Regression (PCR)** model is trained on historical factor data to predict forward returns. This approach reduces noise and captures the most significant drivers of alpha. The final signal is dynamically tilted based on a macro regime indicator (the 10y-2y yield spread).
+  - **Factor Library**: The factor model is built on a comprehensive set of individual factors, grouped into five core families. This granular approach allows for more precise risk and return attribution.
+    - **Value**: Book-to-Price (B/P), Earnings-to-Price (E/P), Sales-to-Price (S/P), and Cash-Flow-to-Price (CF/P).
+    - **Quality**: Return-on-Equity (ROE), Financial Leverage, and ROE Stability.
+    - **Profitability**: Gross Profitability (GPA), Operating Margin, and Net Margin.
+    - **Momentum**: 12-Month Momentum, 6-Month Acceleration, and Volatility-Scaled Momentum.
+    - **Investment**: Total Asset Growth and CAPEX Growth.
+  - **Signal Generation**: All factors are individually winsorized and standardized to ensure robustness. The final alpha score is generated using a Principal Component Regression (PCR) model, which creates a diversified signal from these inputs. This approach reduces noise and captures the most significant drivers of alpha. The final signal is dynamically tilted based on a macro regime indicator (the 10y-2y yield spread).
 - **Portfolio Construction**: Mean-Variance Optimization with L2 regularization and mixed-integer constraints.
   - `Objective: max  μ'w - λ·w'Σw - η·||w||₂²`
 - **Constraints Enforced in Solver**:
