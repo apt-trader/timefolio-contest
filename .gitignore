@@ -13,10 +13,10 @@ fetchers/__init__.py
 
 # data folders and files
 db/
+logs/
 cache/
 output/
 test/
-logs/
 
 # Environment variables
 .env
