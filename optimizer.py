@@ -23,6 +23,7 @@ class PortfolioOptimizer:
         self.small_cap_threshold = settings.get('small_cap_threshold', 1e12)
         self.max_small_cap_weight = settings.get('max_small_cap_weight', 0.4)
         self.verbose = settings.get('verbose', False)
+        self.cov_l2_alpha = settings.get('cov_l2_alpha', 0.05) # Regularization for covariance matrix
         
         # Check if we're in tuning mode (skip small-cap restrictions)
         self.skip_rules = 'tuner' in sys.modules or 'optuna' in sys.modules
@@ -121,6 +122,17 @@ class PortfolioOptimizer:
         cov_matrix *= 252  # Annualize
         return (cov_matrix + cov_matrix.T) / 2 # Enforce symmetry for numerical stability
 
+    def _regularize_covariance(self, cov_matrix: np.ndarray) -> np.ndarray:
+        """Applies L2 regularization to the covariance matrix to ensure it is positive semi-definite."""
+        if self.cov_l2_alpha > 0:
+            # (1 - alpha) * Sigma + alpha * diag(Sigma)
+            # This shrinks the covariance matrix towards a diagonal matrix of its variances, improving conditioning.
+            regularized_cov = (1 - self.cov_l2_alpha) * cov_matrix + \
+                              self.cov_l2_alpha * np.diag(np.diag(cov_matrix))
+            logger.info(f"Applied L2 regularization to covariance matrix with alpha={self.cov_l2_alpha}.")
+            return regularized_cov
+        return cov_matrix
+
     def optimize(self, expected_returns: pd.Series, 
                 returns_df: pd.DataFrame,
                 market_caps: pd.Series, 
@@ -168,6 +180,7 @@ class PortfolioOptimizer:
             caps = market_caps.values
 
             cov_matrix = self._get_covariance_matrix(returns_df)
+            cov_matrix = self._regularize_covariance(cov_matrix)
 
             # --- Diagnostic Logging ---
             logger.info("--- Optimizer Input Diagnostics ---")
