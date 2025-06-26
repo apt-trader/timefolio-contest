@@ -1,22 +1,67 @@
 # fetchers/financial_fetcher.py
 import os
 import sys
-import sqlite3
-import logging
+import ssl
 import time
-from datetime import datetime
-import pandas as pd
-from OpenDartReader.dart import OpenDartReader
-from dotenv import load_dotenv
 import argparse
-import yaml
+import logging
 from pathlib import Path
-from typing import Optional, List, Dict
-from tqdm import tqdm
+from typing import Dict, List, Optional, Union
 from collections import deque
 
-load_dotenv()
+import numpy as np
+import pandas as pd
+import requests
+from tqdm import tqdm
+from dart_fss import set_api_key, get_corp_list, fs
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+import certifi
+import sqlite3
+import logging
+import argparse
+import pandas as pd
+from pathlib import Path
+from typing import Dict, List, Optional, Union, Any
+from datetime import datetime, timedelta
+from collections import deque, defaultdict
+
+import urllib3
+import requests
+import OpenDartReader
+import yaml
+from dotenv import load_dotenv
+import numpy as np
+from tqdm import tqdm
+
+load_dotenv()
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('financial_fetcher.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Configure SSL context for better certificate handling
+ssl_context = ssl.create_default_context(cafile=certifi.where())
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Configure requests session with retry strategy
+session = requests.Session()
+retry = requests.adapters.Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[500, 502, 503, 504]
+)
+adapter = requests.adapters.HTTPAdapter(max_retries=retry)
+session.mount('http://', adapter)
+session.mount('https://', adapter)
 
 try:
     config_path = Path(__file__).parent.parent / "config/config.yaml"
@@ -41,19 +86,57 @@ class RateLimiter:
         self.calls_minute.append(time.time()); self.calls_day.append(time.time())
 
 class FinancialsFetcher:
-    def __init__(self, api_key: str, db_path: str = str(Path(__file__).parent.parent / "db" / "krx_data.db")):
-        if not api_key: raise ValueError("DART API key is required.")
+    def __init__(self, api_key: str, db_path: str = str(Path(__file__).parent.parent / "db" / "krx_data.db"), verify_ssl: bool = True):
+        if not api_key:
+            raise ValueError("DART API key is required.")
+            
         self.api_key = api_key
+        self.verify_ssl = verify_ssl
+        
+        # Configure cache directory
         self.cache_dir = Path(__file__).parent / 'docs_cache'
         self.cache_dir.mkdir(exist_ok=True, parents=True)
-        os.environ['OPENDART_CACHE_PATH'] = str(self.cache_dir)
-        self.dart = OpenDartReader(self.api_key)
+        
+        # Initialize OpenDartReader
+        try:
+            # Create a requests session with retry strategy
+            session = requests.Session()
+            retry_strategy = requests.adapters.Retry(
+                total=3,
+                backoff_factor=1,
+                status_forcelist=[500, 502, 503, 504]
+            )
+            adapter = requests.adapters.HTTPAdapter(max_retries=retry_strategy)
+            session.mount('http://', adapter)
+            session.mount('https://', adapter)
+            
+            # Configure SSL verification
+            if not self.verify_ssl:
+                session.verify = False
+                logger.warning("SSL verification is disabled. This is not recommended for production use.")
+            
+            # Initialize OpenDartReader with the configured session
+            self.dart = OpenDartReader(api_key)
+            # Set the session directly on the client's session attribute if available
+            if hasattr(self.dart, 'session'):
+                self.dart.session = session
+                
+            logger.info("Successfully initialized OpenDartReader")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenDartReader: {e}")
+            raise
+        
+        # Database setup
         self.db_path = db_path
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn.execute('PRAGMA journal_mode=WAL')  # Better concurrency
         self.corp_code_cache: Dict[str, Optional[str]] = {}
         self._init_financials_table()
         self.existing_columns = self._get_existing_columns()
         self.rate_limiter = RateLimiter()
+        
+        logger.info(f"FinancialFetcher initialized with SSL verification {'enabled' if verify_ssl else 'disabled'}")
 
     def _init_financials_table(self):
         try:
@@ -79,363 +162,356 @@ class FinancialsFetcher:
             self.corp_code_cache[identifier] = corp_code; return corp_code
         except Exception: self.corp_code_cache[identifier] = None; return None
 
-    def fetch_financials(self, corp_code: str, year: int, report_type: str = '11011'):
-        if self.conn.execute("SELECT 1 FROM financials WHERE corp_code = ? AND bsns_year = ? AND reprt_code = ? LIMIT 1", (corp_code, str(year), report_type)).fetchone():
-            return
-        try:
-            self.rate_limiter.wait(); df = self.dart.finstate_all(corp_code, year, report_type, fs_div='CFS')
-            if not isinstance(df, pd.DataFrame) or df.empty:
-                self.rate_limiter.wait(); df = self.dart.finstate_all(corp_code, year, report_type, fs_div='OFS')
-            if isinstance(df, pd.DataFrame) and not df.empty: self._store_financials(df)
-        except Exception as e: logger.error(f"Error processing {corp_code} {year}: {e}", exc_info=True)
-
-    def _store_financials(self, df: pd.DataFrame):
-        if df.empty: return
-        valid_cols = [c for c in df.columns if c in self.existing_columns]; df_to_store = df[valid_cols].copy()
-        for col in ['thstrm_amount', 'frmtrm_amount', 'bfefrmtrm_amount']:
-            if col in df_to_store: df_to_store[col] = pd.to_numeric(df_to_store[col], errors='coerce')
-        pk_cols = ['rcept_no', 'account_id', 'fs_div']; update_cols = [f'"{c}" = excluded."{c}"' for c in df_to_store.columns if c not in pk_cols]
-        sql = f"""
-            INSERT INTO financials ({','.join('"' + c + '"' for c in df_to_store.columns)})
-            VALUES ({','.join(['?']*len(df_to_store.columns))})
-            ON CONFLICT({','.join(pk_cols)})
-            DO UPDATE SET {','.join(update_cols)}
+    def fetch_financials(self, corp_code: str, year: int, report_type: str = '11011', max_retries: int = 3):
+        """Fetch financial data with retry logic and improved error handling.
+        
+        Args:
+            corp_code: Company code
+            year: Fiscal year
+            report_type: Report type code (default: '11011' for annual report)
+            max_retries: Maximum number of retry attempts (default: 3)
+            
+        Returns:
+            bool: True if data was successfully fetched and stored, False otherwise
         """
-        with self.conn: self.conn.executemany(sql, df_to_store.where(pd.notna(df_to_store), None).to_records(index=False).tolist())
+        # Skip if data already exists
+        if self.conn.execute(
+            "SELECT 1 FROM financials WHERE corp_code = ? AND bsns_year = ? AND reprt_code = ? LIMIT 1",
+            (corp_code, str(year), report_type)
+        ).fetchone():
+            logger.debug(f"Data already exists for {corp_code} {year} (report: {report_type})")
+            return True
+
+        last_exception = None
+        for attempt in range(max_retries):
+            try:
+                # Try with CFS (Consolidated) first
+                self.rate_limiter.wait()
+                logger.debug(f"Attempt {attempt + 1}/{max_retries}: Fetching CFS data for {corp_code} {year}")
+                
+                try:
+                    # Try with SSL verification first
+                    df = self.dart.finstate_all(corp_code, year, report_type, fs_div='CFS')
+                    logger.debug(f"CFS data retrieved for {corp_code} {year}")
+                except Exception as cfs_error:
+                    logger.debug(f"CFS fetch failed for {corp_code} {year}, trying OFS. Error: {cfs_error}")
+                    df = None
+                
+                # If CFS failed or empty, try OFS (Separate)
+                if not isinstance(df, pd.DataFrame) or df.empty:
+                    self.rate_limiter.wait()
+                    logger.debug(f"Trying OFS data for {corp_code} {year}")
+                    df = self.dart.finstate_all(corp_code, year, report_type, fs_div='OFS')
+                
+                # If we got valid data, store it and return
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    logger.info(f"Successfully retrieved financial data for {corp_code} {year}")
+                    self._store_financials(df)
+                    return True
+                    
+                logger.warning(f"No data returned for {corp_code} {year} (attempt {attempt + 1}/{max_retries})")
+                    
+            except requests.exceptions.SSLError as ssl_err:
+                last_exception = ssl_err
+                logger.warning(f"SSL Error (attempt {attempt + 1}/{max_retries}) for {corp_code} {year}: {ssl_err}")
+                if attempt == max_retries - 1:  # Last attempt
+                    logger.error(f"Max retries reached for {corp_code} {year} due to SSL errors. Giving up.")
+                time.sleep(2 ** attempt)  # Exponential backoff
+                
+            except requests.exceptions.RequestException as req_err:
+                last_exception = req_err
+                logger.error(f"Request error for {corp_code} {year} (attempt {attempt + 1}/{max_retries}): {req_err}")
+                if attempt == max_retries - 1:
+                    logger.error(f"Max retries reached for {corp_code} {year} due to request errors.")
+                time.sleep(2 ** attempt)  # Exponential backoff
+                
+            except Exception as e:
+                last_exception = e
+                logger.error(f"Unexpected error processing {corp_code} {year} (attempt {attempt + 1}/{max_retries}): {e}", 
+                            exc_info=True)
+                if attempt == max_retries - 1:
+                    logger.error(f"Max retries reached for {corp_code} {year} due to unexpected errors.")
+                time.sleep(2 ** attempt)  # Exponential backoff
+        
+        # If we get here, all attempts failed
+        logger.error(f"Failed to fetch data for {corp_code} {year} after {max_retries} attempts. "
+                    f"Last error: {str(last_exception)[:200]}")
+        return False
+
+    def _store_financials(self, df: pd.DataFrame) -> bool:
+        """Process and store financial data in the database.
+        
+        Args:
+            df: DataFrame containing financial data to store
+            
+        Returns:
+            bool: True if storage was successful, False otherwise
+        """
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            logger.warning("No data to store: Empty or invalid DataFrame provided")
+            return False
+            
+        try:
+            # Validate and prepare data
+            valid_cols = [c for c in df.columns if c in self.existing_columns]
+            if not valid_cols:
+                logger.error("No valid columns found in the DataFrame to store")
+                return False
+                
+            df_to_store = df[valid_cols].copy()
+            
+            # Convert numeric columns
+            numeric_cols = ['thstrm_amount', 'frmtrm_amount', 'bfefrmtrm_amount', 'ord']
+            for col in numeric_cols:
+                if col in df_to_store:
+                    df_to_store[col] = pd.to_numeric(df_to_store[col], errors='coerce')
+            
+            # Define primary key and update columns
+            pk_cols = ['rcept_no', 'account_id', 'fs_div']
+            missing_pk_cols = [col for col in pk_cols if col not in df_to_store.columns]
+            if missing_pk_cols:
+                logger.error(f"Missing required primary key columns: {missing_pk_cols}")
+                return False
+                
+            update_cols = [f'"{c}" = excluded."{c}"' 
+                         for c in df_to_store.columns 
+                         if c not in pk_cols]
+            
+            # Prepare SQL query
+            columns_str = ','.join(f'"{c}"' for c in df_to_store.columns)
+            placeholders = ','.join(['?'] * len(df_to_store.columns))
+            updates_str = ','.join(update_cols)
+            
+            sql = f"""
+                INSERT INTO financials ({columns_str})
+                VALUES ({placeholders})
+                ON CONFLICT({','.join(pk_cols)})
+                DO UPDATE SET {updates_str}
+            """
+            
+            # Prepare data for batch insert
+            data = df_to_store.where(pd.notna(df_to_store), None)
+            records = data.to_records(index=False).tolist()
+            
+            # Execute in transaction
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.executemany(sql, records)
+                
+                # Log success
+                corp_codes = df_to_store['corp_code'].unique()
+                years = df_to_store['bsns_year'].unique()
+                logger.info(
+                    f"Stored {len(records)} financial records for "
+                    f"{len(corp_codes)} companies for year(s) {', '.join(map(str, sorted(years)))}"
+                )
+                
+                return True
+                
+        except sqlite3.Error as db_err:
+            logger.error(f"Database error while storing financial data: {db_err}", exc_info=True)
+            if hasattr(self, 'conn'):
+                self.conn.rollback()
+            return False
+            
+        except Exception as e:
+            logger.error(f"Unexpected error while storing financial data: {e}", exc_info=True)
+            if hasattr(self, 'conn'):
+                self.conn.rollback()
+            return False
 
     def get_latest_fundamentals(self, tickers: List[str], as_of_date: str) -> pd.DataFrame:
+        """Load the latest fundamental data for the given tickers as of a specific date.
+        
+        Args:
+            tickers: List of stock ticker symbols
+            as_of_date: Date in 'YYYY-MM-DD' format to get data as of
+            
+        Returns:
+            DataFrame containing the latest fundamental data for each ticker
+        """
         logger.info(f"Loading latest fundamentals for {len(tickers)} tickers as of {as_of_date}.")
+        
         # Define all required account mappings with multiple possible field names
-        # Format: 'OurFieldName': ['primary_field', 'alternative_field1', 'alternative_field2']
         account_map = {
             # Basic financials
-            'Assets': ['ifrs-full_Assets'],
-            'Liabilities': ['ifrs-full_Liabilities'],
-            'Equity': ['ifrs-full_Equity'],
-            'NetIncome': ['ifrs-full_ProfitLoss', 'dart_NetIncomeLoss'],
-            'GrossProfit': ['ifrs-full_GrossProfit', 'dart_GrossProfit'],
-            'Sales': ['ifrs-full_Revenue', 'dart_Revenue'],
-            'OperatingCF': ['ifrs-full_CashFlowsFromUsedInOperatingActivities', 'dart_CashFlowsFromUsedInOperatingActivities'],
-            
-            # For Cash-Based Operating Profitability
-            'CostOfGoodsSold': [
-                'ifrs-full_CostOfSales',
-                'dart_CostOfSales',
-                'ifrs-full_CostOfGoodsAndServicesSold'
+            'Assets': ['자산총계', 'ifrs-full_Assets', 'dart_TotalAssets'],
+            'Liabilities': ['부채총계', 'ifrs-full_Liabilities', 'dart_TotalLiabilities'],
+            'Equity': ['자본총계', 'ifrs-full_Equity', 'dart_TotalEquity'],
+            'NetIncome': ['당기순이익', '당기순이익(손실)', 'ifrs-full_ProfitLoss', 'dart_NetIncomeLoss'],
+            'GrossProfit': ['매출총이익', 'ifrs-full_GrossProfit', 'dart_GrossProfit'],
+            'Sales': [
+                '매출액', 
+                '수익(매출액)', 
+                'ifrs-full_Revenue', 
+                'dart_Revenue', 
+                'ifrs-full_RevenueFromContractsWithCustomers'
             ],
-            'SellingGeneralAdministrative': [
-                'dart_SellingGeneralAndAdministrativeExpenses',
-                'ifrs-full_AdministrativeExpense',
-                'dart_OperatingExpenses',  # Fallback to total operating expenses
-                'ifrs-full_OtherExpenseByFunction'  # Sometimes SG&A is here
+            'OperatingIncome': [
+                '영업이익', 
+                '영업이익(손실)', 
+                'ifrs-full_ProfitLossFromOperatingActivities', 
+                'dart_OperatingIncomeLoss'
             ],
-            'ResearchAndDevelopmentExpense': [
-                'ifrs-full_ResearchAndDevelopmentExpense',
-                'dart_ResearchAndDevelopmentExpense',
-                'ifrs-full_ResearchAndDevelopmentExpenseRecognisedAsExpense',
-                'dart_ResearchAndDevelopmentExpenseRecognisedAsExpense'
+            'OperatingCF': [
+                '영업활동으로인한현금흐름', 
+                'ifrs-full_CashFlowsFromUsedInOperatingActivities', 
+                'dart_CashFlowsFromUsedInOperatingActivities'
             ],
-            
-            # For Net Operating Assets (NOA)
-            'CashAndCashEquivalents': [
-                'ifrs-full_CashAndCashEquivalents',
-                'dart_CashAndCashEquivalents',
-                'ifrs-full_Cash',
-                'dart_Cash'
+            'CostOfGoodsSold': ['매출원가', 'ifrs-full_CostOfSales', 'dart_CostOfSales'],
+            'InvestingCF': [
+                '투자활동으로인한현금흐름', 
+                'ifrs-full_CashFlowsFromUsedInInvestingActivities'
+            ],
+            'FinancingCF': [
+                '재무활동으로인한현금흐름', 
+                'ifrs-full_CashFlowsFromUsedInFinancingActivities'
             ],
             'TotalDebt': [
-                'ifrs-full_LongtermBorrowings',
-                'dart_LongtermBorrowings',
-                'ifrs-full_ShorttermBorrowings',  # Include short-term debt
-                'dart_ShorttermBorrowings',
-                'ifrs-full_LiabilitiesFromFinancingActivities'  # Broader category
-            ]
+                '총차입금', 
+                'ifrs-full_ShorttermBorrowings', 
+                'ifrs-full_LongtermBorrowings'
+            ],
+            'CashAndEquivalents': ['현금및현금성자산', 'ifrs-full_CashAndCashEquivalents'],
+            'CurrentAssets': ['유동자산', 'ifrs-full_CurrentAssets'],
+            'CurrentLiabilities': ['유동부채', 'ifrs-full_CurrentLiabilities'],
+            'AccountsReceivable': ['매출채권', 'ifrs-full_TradeAndOtherCurrentReceivables'],
+            'TotalInventory': ['재고자산', 'ifrs-full_Inventories']
         }
         
-        # Get corporation codes for all tickers
-        corp_codes_map = {ticker: self.find_corp_code(ticker) for ticker in tickers}
-        valid_corp_codes = [c for c in list(corp_codes_map.values()) if c is not None]
-        if not valid_corp_codes:
-            logger.warning("No valid corporation codes found for the provided tickers.")
-            return pd.DataFrame()
-            
-        ticker_lookup = {v: k for k, v in list(corp_codes_map.items())}
-        
-        # Get all possible account fields to query
-        all_fields = []
-        field_mapping = {}
-        
-        # Create a mapping of actual DB fields to our standard field names
-        for field_name, possible_fields in list(account_map.items()):
-            for field in possible_fields:
-                field_mapping[field] = field_name
-                all_fields.append(field)
-        
-        # Build and execute the SQL query
-        placeholders = ','.join(['?'] * len(valid_corp_codes))
-        field_placeholders = ','.join(['?'] * len(all_fields))
-        
-        sql = f"""
-        WITH LatestReports AS (
-            SELECT corp_code, MAX(rcept_no) AS rcept_no 
-            FROM financials 
-            WHERE corp_code IN ({placeholders})
-              AND bsns_year <= ? 
-              AND reprt_code = '11011' 
-            GROUP BY corp_code
-        ) 
-        SELECT f.corp_code, f.account_id, f.thstrm_amount 
-        FROM financials f 
-        JOIN LatestReports lr ON f.corp_code = lr.corp_code AND f.rcept_no = lr.rcept_no 
-        WHERE f.account_id IN ({field_placeholders})
-        """
-        
-        params = valid_corp_codes + [as_of_date[:4]] + all_fields
-        
         try:
+            # Get corporation codes for all tickers
+            corp_codes_map = {ticker: self.find_corp_code(ticker) for ticker in tickers}
+            valid_corp_codes = [c for c in list(corp_codes_map.values()) if c is not None]
+            
+            if not valid_corp_codes:
+                logger.warning("No valid corporation codes found for the provided tickers.")
+                return pd.DataFrame()
+                
+            ticker_lookup = {v: k for k, v in corp_codes_map.items()}
+            
+            # Get all possible account fields to query
+            all_fields = []
+            field_mapping = {}
+            
+            # Create a mapping of actual DB fields to our standard field names
+            for field_name, possible_fields in account_map.items():
+                for field in possible_fields:
+                    field_mapping[field] = field_name
+                    all_fields.append(field)
+            
+            if not all_fields:
+                logger.warning("No account fields found to query.")
+                return pd.DataFrame()
+            
+            # Build and execute the SQL query
+            placeholders = ','.join(['?'] * len(valid_corp_codes))
+            field_placeholders = ','.join(['?'] * len(all_fields))
+            
+            sql = f"""
+            WITH LatestReports AS (
+                SELECT corp_code, MAX(rcept_no) AS rcept_no 
+                FROM financials 
+                WHERE corp_code IN ({placeholders})
+                  AND bsns_year <= ? 
+                  AND reprt_code = '11011' 
+                GROUP BY corp_code
+            ) 
+            SELECT f.corp_code, f.account_id, f.thstrm_amount 
+            FROM financials f 
+            JOIN LatestReports lr ON f.corp_code = lr.corp_code AND f.rcept_no = lr.rcept_no 
+            WHERE f.account_id IN ({field_placeholders})
+            """
+            
+            params = valid_corp_codes + [as_of_date[:4]] + all_fields
+            
             with self.conn:
                 raw_df = pd.read_sql_query(sql, self.conn, params=params)
-                
+
             if raw_df.empty:
                 logger.warning("No financial data found for the given tickers and date range.")
                 return pd.DataFrame()
                 
-            # Process the raw data
-            processed_data = {}
+            # Process the raw data into a clean DataFrame
+            result_data = []
             
-            # Group by corporation code
-            for corp_code, group in raw_df.groupby('corp_code'):
-                corp_data = {}
-                
-                # For each field, try to find a value using the priority order
-                for field_name, possible_fields in list(account_map.items()):
-                    for field in possible_fields:
-                        if field in group['account_id'].values:
-                            value = group[group['account_id'] == field]['thstrm_amount'].iloc[0]
-                            if not pd.isna(value):
-                                corp_data[field_name] = value
-                                break
-                
-                if corp_data:  # Only add if we have data
-                    processed_data[corp_code] = corp_data
+            for (corp_code, account_id), group in raw_df.groupby(['corp_code', 'account_id']):
+                if account_id in field_mapping:
+                    standard_field = field_mapping[account_id]
+                    amount = group['thstrm_amount'].iloc[0] if not group.empty else None
+                    if amount is not None:
+                        result_data.append({
+                            'ticker': ticker_lookup.get(corp_code, corp_code),
+                            'field': standard_field,
+                            'value': amount
+                        })
             
-            # Convert to DataFrame
-            if not processed_data:
-                logger.warning("No financial data found after processing")
+            if not result_data:
+                logger.warning("No valid financial data found after processing.")
                 return pd.DataFrame()
                 
-            pivot_df = pd.DataFrame.from_dict(processed_data, orient='index')
+            # Convert to a pivot table with tickers as index and fields as columns
+            result_df = pd.DataFrame(result_data).pivot(
+                index='ticker',
+                columns='field',
+                values='value'
+            ).reset_index()
             
-            # Map corporation codes back to tickers
-            pivot_df.index = pivot_df.index.map(ticker_lookup)
-            
-            # Log any missing fields for debugging
-            missing_fields = [k for k in account_map if k not in pivot_df.columns]
-            if missing_fields:
-                logger.warning(f"Missing fields in financial data: {', '.join(missing_fields)}")
-            else:
-                logger.info("All required financial fields found")
-                
-            return pivot_df
+            return result_df
             
         except Exception as e:
-            logger.error(f"Error fetching latest fundamentals: {e}", exc_info=True)
+            logger.error(f"Error in get_latest_fundamentals: {e}", exc_info=True)
             return pd.DataFrame()
 
-    def get_historical_fundamentals(self, tickers: List[str], as_of_date: str, years: int = 5) -> Dict[str, pd.DataFrame]:
-        """
-        Load historical fundamental data for multiple tickers with batching to avoid SQL parameter limits.
-        
-        Args:
-            tickers: List of ticker symbols
-            as_of_date: Reference date in 'YYYY-MM-DD' format
-            years: Number of years of historical data to retrieve
-            
-        Returns:
-            Dictionary mapping tickers to DataFrames of historical fundamentals
-        """
-        logger.info(f"Loading {years}-year historical fundamentals for {len(tickers)} tickers as of {as_of_date}.")
-        
-        # Use the same account mapping as get_latest_fundamentals for consistency
-        account_map = {
-            # Basic financials
-            'Assets': ['ifrs-full_Assets'],
-            'Liabilities': ['ifrs-full_Liabilities'],
-            'Equity': ['ifrs-full_Equity'],
-            'NetIncome': ['ifrs-full_ProfitLoss', 'dart_NetIncomeLoss'],
-            'GrossProfit': ['ifrs-full_GrossProfit', 'dart_GrossProfit'],
-            'Sales': ['ifrs-full_Revenue', 'dart_Revenue'],
-            'OperatingCF': ['ifrs-full_CashFlowsFromUsedInOperatingActivities', 'dart_CashFlowsFromUsedInOperatingActivities'],
-            
-            # For Cash-Based Operating Profitability
-            'CostOfGoodsSold': [
-                'ifrs-full_CostOfSales',
-                'dart_CostOfSales',
-                'ifrs-full_CostOfGoodsAndServicesSold'
-            ],
-            'SellingGeneralAdministrative': [
-                'dart_SellingGeneralAndAdministrativeExpenses',
-                'ifrs-full_AdministrativeExpense',
-                'dart_OperatingExpenses',
-                'ifrs-full_OtherExpenseByFunction'
-            ],
-            'ResearchAndDevelopmentExpense': [
-                'ifrs-full_ResearchAndDevelopmentExpense',
-                'dart_ResearchAndDevelopmentExpense',
-                'ifrs-full_ResearchAndDevelopmentExpenseRecognisedAsExpense',
-                'dart_ResearchAndDevelopmentExpenseRecognisedAsExpense'
-            ],
-            
-            # For Net Operating Assets (NOA)
-            'CashAndCashEquivalents': [
-                'ifrs-full_CashAndCashEquivalents',
-                'dart_CashAndCashEquivalents',
-                'ifrs-full_Cash',
-                'dart_Cash'
-            ],
-            'TotalDebt': [
-                'ifrs-full_LongtermBorrowings',
-                'dart_LongtermBorrowings',
-                'ifrs-full_ShorttermBorrowings',
-                'dart_ShorttermBorrowings',
-                'ifrs-full_LiabilitiesFromFinancingActivities'
-            ]
-        }
-        
-        # Get all account IDs we need to query
-        all_account_ids = set()
-        for accounts in list(account_map.values()):
-            all_account_ids.update(accounts)
-        all_account_ids = list(all_account_ids)
-        
-        # Get corporation codes for all tickers
-        corp_codes_map = {ticker: self.find_corp_code(ticker) for ticker in tickers}
-        valid_corp_codes = [c for c in list(corp_codes_map.values()) if c is not None]
-        
-        if not valid_corp_codes:
-            logger.warning("No valid corporation codes found for the provided tickers.")
-            return {}
-            
-        ticker_lookup = {v: k for k, v in list(corp_codes_map.items()) if v is not None}
-        
-        # Calculate date range
+    def _process_and_validate_fundamentals(self, raw_df: pd.DataFrame, account_map: Dict, ticker_lookup: Dict) -> pd.DataFrame:
+        """Process raw financial data, calculate ratios, and validate."""
+        # Pivot the data to have accounts as columns
+        df = raw_df.pivot(index='corp_code', columns='account_id', values='thstrm_amount')
+
+        # Create a reverse mapping from DB field names to our standard names
+        reverse_mapping = {field: std_name for std_name, fields in account_map.items() for field in fields}
+
+        # Rename columns to our standard names, handling duplicates by keeping the first
+        df = df.rename(columns=reverse_mapping)
+        df = df.groupby(level=0, axis=1).first()
+
+        # Calculate financial ratios
+        df = self._calculate_financial_ratios(df)
+
+        # Add ticker symbols and clean up index
+        df['ticker'] = df.index.map(ticker_lookup)
+        df = df.reset_index(drop=True).set_index('ticker')
+
+        logger.info(f"Successfully processed fundamentals for {len(df)} tickers.")
+        return df
+
+    def _calculate_financial_ratios(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Calculate key financial ratios safely."""
         try:
-            current_year = int(as_of_date[:4])
-            start_year = current_year - years
-            end_year = current_year - 1  # Exclude current year as it might be incomplete
-            
-            # Process tickers in batches to avoid SQL parameter limits
-            batch_size = 50  # Conservative batch size
-            all_raw_dfs = []
-            
-            for i in range(0, len(valid_corp_codes), batch_size):
-                batch_codes = valid_corp_codes[i:i + batch_size]
-                logger.debug(f"Processing batch {i//batch_size + 1}/{(len(valid_corp_codes)-1)//batch_size + 1} with {len(batch_codes)} tickers")
-                
-                # Build placeholders for the batch
-                placeholders = ','.join(['?'] * len(batch_codes))
-                field_placeholders = ','.join(['?'] * len(all_account_ids))
-                
-                sql = f"""
-                WITH YearlyReports AS (
-                    SELECT 
-                        corp_code,
-                        bsns_year,
-                        MAX(rcept_no) AS rcept_no
-                    FROM financials
-                    WHERE corp_code IN ({placeholders})
-                      AND bsns_year >= ?
-                      AND bsns_year <= ?
-                      AND reprt_code = '11011'
-                    GROUP BY corp_code, bsns_year
-                )
-                SELECT 
-                    f.corp_code,
-                    f.bsns_year,
-                    f.account_id,
-                    f.thstrm_amount
-                FROM financials f
-                JOIN YearlyReports yr ON f.corp_code = yr.corp_code 
-                    AND f.rcept_no = yr.rcept_no
-                WHERE f.account_id IN ({field_placeholders})
-                """
-                
-                # Prepare parameters for this batch
-                params = batch_codes + [start_year, end_year] + all_account_ids
-                
-                try:
-                    with self.conn:
-                        batch_df = pd.read_sql_query(sql, self.conn, params=params)
-                        if not batch_df.empty:
-                            all_raw_dfs.append(batch_df)
-                except Exception as e:
-                    logger.error(f"Error fetching batch {i//batch_size + 1}: {e}")
-                    continue
-            
-            if not all_raw_dfs:
-                logger.warning("No data found for any batch")
-                return {}
-                
-            # Combine all batch results
-            raw_df = pd.concat(all_raw_dfs, ignore_index=True)
-                
-            if raw_df.empty:
-                logger.warning("No historical financial data found for the given tickers and date range.")
-                return {}
-                
-            # Process the raw data into a dictionary of DataFrames
-            result = {}
-            
-            # Group by ticker and year
-            for (corp_code, year), year_group in raw_df.groupby(['corp_code', 'bsns_year']):
-                ticker = ticker_lookup[corp_code]
-                
-                # Initialize ticker in result if not exists
-                if ticker not in result:
-                    result[ticker] = {}
-                
-                # Process each field for this ticker/year
-                year_data = {}
-                for field_name, possible_fields in list(account_map.items()):
-                    for field in possible_fields:
-                        if field in year_group['account_id'].values:
-                            value = year_group[year_group['account_id'] == field]['thstrm_amount'].iloc[0]
-                            if not pd.isna(value):
-                                year_data[field_name] = value
-                                break
-                
-                # Add to result if we have data
-                if year_data:
-                    result[ticker][year] = year_data
-            
-            # Convert to DataFrames with years as index
-            final_result = {}
-            for ticker, year_data in list(result.items()):
-                if year_data:  # Only process if we have data
-                    df = pd.DataFrame.from_dict(year_data, orient='index')
-                    df.index = pd.to_datetime(df.index.astype(str) + '-12-31')  # Use year-end dates
-                    final_result[ticker] = df
-            
-            # Log any completely missing fields
-            all_fields_found = set()
-            for df in list(final_result.values()):
-                all_fields_found.update(df.columns)
-            
-            missing_fields = [f for f in account_map if f not in all_fields_found]
-            if missing_fields:
-                logger.warning(f"Missing fields in historical data: {', '.join(missing_fields)}")
-            else:
-                logger.info("All required historical financial fields found")
-                
-            return final_result
-            
+            # Ensure columns exist before calculation
+            if 'NetIncome' in df and 'Equity' in df:
+                df['ROE'] = df['NetIncome'] / df['Equity'].replace(0, np.nan)
+            if 'NetIncome' in df and 'Assets' in df:
+                df['ROA'] = df['NetIncome'] / df['Assets'].replace(0, np.nan)
+            if 'GrossProfit' in df and 'Sales' in df:
+                df['GrossMargin'] = df['GrossProfit'] / df['Sales'].replace(0, np.nan)
+            if 'OperatingIncome' in df and 'Sales' in df:
+                df['OperatingMargin'] = df['OperatingIncome'] / df['Sales'].replace(0, np.nan)
+            if 'TotalDebt' in df and 'Equity' in df:
+                df['DebtToEquity'] = df['TotalDebt'] / df['Equity'].replace(0, np.nan)
+            if 'CurrentAssets' in df and 'CurrentLiabilities' in df:
+                df['CurrentRatio'] = df['CurrentAssets'] / df['CurrentLiabilities'].replace(0, np.nan)
+            return df
         except Exception as e:
-            logger.error(f"Error fetching historical fundamentals: {e}", exc_info=True)
-            return {}
+            logger.error(f"Error calculating financial ratios: {e}")
+            return df
 
     def __del__(self):
-        try: self.conn.close()
-        except: pass
+        try:
+            if hasattr(self, 'conn'):
+                self.conn.close()
+        except Exception as e:
+            logger.debug(f"Error closing database connection: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fetch DART financial statements.")
@@ -444,14 +520,47 @@ if __name__ == "__main__":
     group.add_argument("-a", "--all", action="store_true", help="Fetch for all tickers in universe file.")
     parser.add_argument("-s", "--start-year", required=True, type=int, help="Start year (YYYY)")
     parser.add_argument("-e", "--end-year", required=True, type=int, help="End year (YYYY)")
+    parser.add_argument("--universe-file", type=str, default="universe.csv",
+                        help="Path to universe file (default: universe.csv)")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    if not (api_key := os.getenv('DART_API_KEY')): logger.critical("DART_API_KEY not found."); sys.exit(1)
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Get API key from environment
+    api_key = os.getenv('DART_API_KEY')
+    if not api_key:
+        logger.critical("DART_API_KEY environment variable not found")
+        sys.exit(1)
+    
+    # Initialize fetcher
     fetcher = FinancialsFetcher(api_key=api_key)
+    
+    # Get tickers to process
     if args.all:
-        if not (universe_file and universe_file.exists()): logger.critical("Universe file not found."); sys.exit(1)
-        tickers = pd.read_csv(universe_file)['종목코드'].astype(str).str.lstrip('A').str.zfill(6).tolist()
-    else: tickers = [args.identifier]
+        universe_file = Path(args.universe_file)
+        if not universe_file.exists():
+            logger.critical(f"Universe file not found: {universe_file}")
+            sys.exit(1)
+            
+        try:
+            tickers = pd.read_csv(universe_file)['종목코드']\
+                .astype(str)\
+                .str.lstrip('A')\
+                .str.zfill(6)\
+                .tolist()
+        except Exception as e:
+            logger.error(f"Error reading universe file: {e}")
+            sys.exit(1)
+    else:
+        tickers = [args.identifier]
+    
+    # Process each year and ticker
     for year in range(args.start_year, args.end_year + 1):
         for ticker in tqdm(tickers, desc=f"Processing Year {year}", unit="ticker"):
-            if corp_code := fetcher.find_corp_code(ticker): fetcher.fetch_financials(corp_code, year)
+            corp_code = fetcher.find_corp_code(ticker)
+            if corp_code:
+                fetcher.fetch_financials(corp_code, year)
