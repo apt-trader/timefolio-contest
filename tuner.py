@@ -40,9 +40,10 @@ DEFAULT_DB_URL = 'sqlite:///tuning_results.db'
 
 # Parameter search spaces
 PARAM_SPACES = {
-    'n_pca_components': {'type': 'int', 'low': 3, 'high': 15},
+    'n_pca_components': {'type': 'int', 'low': 3, 'high': 14},
     'risk_aversion': {'type': 'float', 'low': 0.1, 'high': 10.0, 'log': True},
     'l2_penalty': {'type': 'float', 'low': 0.001, 'high': 1.0, 'log': True},
+    'cov_l2_alpha': {'type': 'float', 'low': 0.01, 'high': 0.3, 'log': True},
     'momentum_window': {'type': 'int', 'low': 5, 'high': 63}
 }
 
@@ -331,7 +332,7 @@ def parse_arguments():
     # Execution control
     parser.add_argument('--n-jobs', 
                       type=int, 
-                      default=-1,
+                      default=1,
                       help='Number of parallel jobs to run (-1 for all cores).')
     parser.add_argument('--timeout', 
                       type=float, 
