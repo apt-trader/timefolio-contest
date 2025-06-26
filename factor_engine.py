@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 import logging
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
@@ -9,6 +9,12 @@ from sklearn.decomposition import PCA
 from sklearn.pipeline import Pipeline
 
 logger = logging.getLogger(__name__)
+
+def _safe_get(df: pd.DataFrame, key: str, index) -> pd.Series:
+    """Safely get a column from a dataframe, returning a series of NaNs if not found."""
+    if key in df:
+        return df[key]
+    return pd.Series(np.nan, index=index)
 
 class FactorEngine:
     """
@@ -19,7 +25,6 @@ class FactorEngine:
     def __init__(self, settings: Dict[str, Any] = None):
         """
         Initializes the FactorEngine.
-
         Args:
             settings (Dict[str, Any]): Configuration settings for the factor engine.
         """
@@ -27,213 +32,132 @@ class FactorEngine:
         self.small_cap_threshold = self.settings.get('small_cap_threshold', 1_000_000_000_000)
         self.model: Pipeline = None
         self.feature_names: List[str] = None
-        self.factor_df = pd.DataFrame()
-        self.latest_market_caps: pd.DataFrame = None
+        self.latest_market_caps: pd.Series = None
 
-    def _cross_sectional_rank(self, series: pd.Series) -> pd.Series:
-        """
-        Ranks a series cross-sectionally and scales it from -1 to 1.
-        """
-        return series.rank(pct=True).mul(2).sub(1)
+    def _winsorize(self, series: pd.Series, limits=(0.05, 0.05)) -> pd.Series:
+        """Limits extreme values to reduce the impact of outliers."""
+        return series.clip(lower=series.quantile(limits[0]), upper=series.quantile(1 - limits[1]))
 
-    def _validate_and_align_factor(self, factor_values: pd.Series, expected_index: pd.Index, factor_name: str) -> pd.Series:
-        """
-        Validates and aligns a factor Series to the expected index.
-        """
-        if factor_values is None or factor_values.empty:
-            return pd.Series(0, index=expected_index)
+    def _standardize(self, series: pd.Series) -> pd.Series:
+        """Scales a series to have a mean of 0 and a standard deviation of 1."""
+        std = series.std()
+        if std == 0:
+            return series - series.mean()
+        return (series - series.mean()) / std
+
+    def _calculate_value_factors(self, fundamentals: pd.DataFrame, market_caps: pd.Series) -> Tuple[pd.Series, ...]:
+        """Calculates B/P, E/P, S/P, and CF/P."""
+        mcaps = market_caps.replace(0, np.nan)
+        book_value = _safe_get(fundamentals, 'total_equity', market_caps.index)
+        earnings = _safe_get(fundamentals, 'net_income', market_caps.index)
+        sales = _safe_get(fundamentals, 'revenue', market_caps.index)
+        cash_flow = _safe_get(fundamentals, 'operating_cash_flow', market_caps.index)
         
-        factor_values = pd.to_numeric(factor_values, errors='coerce')
-        aligned = factor_values.reindex(expected_index)
-        aligned.replace([np.inf, -np.inf], np.nan, inplace=True)
-        return aligned.fillna(0)
+        b2p = book_value / mcaps
+        e2p = earnings / mcaps
+        s2p = sales / mcaps
+        c2p = cash_flow / mcaps
+        return b2p, e2p, s2p, c2p
 
-    def _calculate_momentum_factors(self, prices: pd.DataFrame) -> pd.Series:
-        if prices.shape[0] < 252: return pd.Series(0, index=prices.columns)
+    def _calculate_quality_factors(self, fundamentals: pd.DataFrame, historical_fundamentals: Dict[str, pd.DataFrame]) -> Tuple[pd.Series, ...]:
+        """Calculates ROE, Financial Leverage, and ROE Stability."""
+        roe = _safe_get(fundamentals, 'roe', fundamentals.index)
+        leverage = _safe_get(fundamentals, 'debt_to_equity', fundamentals.index)
+        
+        roe_stability_values = {}
+        for ticker, df in historical_fundamentals.items():
+            if 'roe' in df.columns and len(df['roe'].dropna()) >= 2:
+                roe_stability_values[ticker] = df['roe'].std()
+        roe_stability = pd.Series(roe_stability_values, name='roe_stability')
+
+        # Higher leverage and instability are bad, so we negate them.
+        return roe, -leverage, -roe_stability
+
+    def _calculate_profitability_factors(self, fundamentals: pd.DataFrame) -> Tuple[pd.Series, ...]:
+        """Calculates Gross Profitability (GPA), Operating Margin, and Net Margin."""
+        total_assets = _safe_get(fundamentals, 'total_assets', fundamentals.index).replace(0, np.nan)
+        revenue = _safe_get(fundamentals, 'revenue', fundamentals.index).replace(0, np.nan)
+        
+        gross_profit = _safe_get(fundamentals, 'gross_profit', fundamentals.index)
+        operating_income = _safe_get(fundamentals, 'operating_income', fundamentals.index)
+        net_income = _safe_get(fundamentals, 'net_income', fundamentals.index)
+
+        gpa = gross_profit / total_assets
+        opm = operating_income / revenue
+        npm = net_income / revenue
+        return gpa, opm, npm
+
+    def _calculate_momentum_factors(self, prices: pd.DataFrame) -> Tuple[pd.Series, ...]:
+        """Calculates 12M momentum, 6M acceleration, and volatility-scaled momentum."""
+        if prices.shape[0] < 252:
+            return pd.Series(dtype=float), pd.Series(dtype=float), pd.Series(dtype=float)
+        
         returns = prices.pct_change()
-        momentum_12m = (prices.shift(21) / prices.shift(252) - 1).iloc[-1]
-        mom_6m = prices.pct_change(126)
-        mom_accel = mom_6m.ffill().pct_change(63).iloc[-1]
-        vol = returns.rolling(252, min_periods=126).std().iloc[-1] * np.sqrt(252)
-        vol_scaled_momentum = momentum_12m / (vol.replace(0, np.nan).add(1e-6))
-        composite = (momentum_12m.fillna(0) + mom_accel.fillna(0) + vol_scaled_momentum.fillna(0)) / 3
-        return self._cross_sectional_rank(composite)
-
-    def _calculate_value_factors(self, fundamentals: pd.DataFrame, latest_prices: pd.Series) -> pd.Series:
-        """Calculate a composite value factor. 
-        Due to sparse income statement data, this factor now primarily relies on Book-to-Price.
-        """
-        def safe_get(df, key):
-            return df[key] if key in df else pd.Series(0, index=df.index)
-
-        # Ensure prices are not zero to avoid division errors
-        prices = latest_prices.replace(0, 1e-6).reindex(fundamentals.index).fillna(1e-6)
-
-        # Book-to-Price (B2P) is the most reliable value metric with available data.
-        b2p = safe_get(fundamentals, 'book_value_per_share') / prices
+        # 12-month momentum, skipping most recent month
+        mom12m = prices.pct_change(252 - 21).iloc[-1]
         
-        # Other metrics like E/P, S/P, CF/P have low coverage and are excluded.
-        # The composite is now just the ranked B2P.
-        composite = b2p.fillna(0)
-        return self._cross_sectional_rank(composite)
-
-    def _calculate_quality_factors(self, fundamentals: pd.DataFrame, historical_fundamentals: Dict[str, pd.DataFrame]) -> pd.Series:
-        """Calculates a composite quality factor based on balance sheet health.
-        Relies on leverage, as ROE has poor data coverage.
-        """
+        # 6-month acceleration
+        mom6m_late = prices.pct_change(126 - 21).iloc[-1]
+        mom6m_early = prices.pct_change(126 - 21).iloc[-126]
+        acceleration = mom6m_late - mom6m_early
         
-        def safe_get(df, key):
-            return df[key] if key in df else pd.Series(0, index=df.index)
-
-        # Leverage is a reliable quality metric based on high-coverage balance sheet data.
-        leverage = safe_get(fundamentals, 'debt_to_equity')
+        # Volatility-scaled momentum
+        vol_scaled_mom = mom12m / returns.rolling(252).std().iloc[-1].replace(0, np.nan)
         
-        # Lower leverage is higher quality, so we rank the negative of the leverage ratio.
-        # A small epsilon is added to avoid division by zero for companies with no debt.
-        composite = -leverage.fillna(0)
-        return self._cross_sectional_rank(composite)
+        return mom12m, acceleration, vol_scaled_mom
 
-    def _calculate_investment_factor(self, historical_fundamentals: Dict[str, pd.DataFrame]) -> pd.Series:
-        """Calculates the investment factor based on asset growth. Lower growth is ranked higher."""
+    def _calculate_investment_factors(self, historical_fundamentals: Dict[str, pd.DataFrame]) -> Tuple[pd.Series, ...]:
+        """Calculates Asset Growth and CAPEX growth."""
         tickers = list(historical_fundamentals.keys())
-        if not historical_fundamentals or not tickers:
-            return pd.Series(dtype=np.float64)
+        if not tickers:
+            return pd.Series(dtype=float), pd.Series(dtype=float)
 
-        hist_df = pd.concat(historical_fundamentals, names=['ticker', 'date']).reset_index()
+        asset_growth_vals = {}
+        capex_growth_vals = {}
         
-        if 'total_assets' not in hist_df.columns:
-            # If total_assets data is missing, return a neutral factor
-            return pd.Series(0, index=tickers)
+        for ticker, df in historical_fundamentals.items():
+            # Asset Growth
+            if 'total_assets' in df.columns and len(df) > 1 and df['total_assets'].iloc[-2] != 0:
+                asset_growth_vals[ticker] = (df['total_assets'].iloc[-1] / df['total_assets'].iloc[-2]) - 1
+            # CAPEX Growth
+            if 'capex' in df.columns and len(df) > 1 and df['capex'].iloc[-2] != 0:
+                 capex_growth_vals[ticker] = (df['capex'].iloc[-1] / df['capex'].iloc[-2]) - 1
 
-        # Calculate asset growth for each ticker
-        asset_growth = hist_df.groupby('ticker')['total_assets'].apply(
-            lambda x: (x.iloc[-1] / x.iloc[-2] - 1) if len(x) > 1 and x.iloc[-2] != 0 else 0
-        )
-        
-        # Reindex to ensure all tickers are present, filling missing ones with 0
-        asset_growth = asset_growth.reindex(tickers).fillna(0)
+        asset_growth = pd.Series(asset_growth_vals)
+        capex_growth = pd.Series(capex_growth_vals)
 
-        # Lower growth is better, so we rank the negative of asset growth
-        return self._cross_sectional_rank(-asset_growth)
-
-    def _calculate_profitability_factors(self, fundamentals: pd.DataFrame) -> pd.Series:
-        """Calculates a composite profitability factor.
-        Uses Asset Turnover as a proxy for profitability due to sparse income statement data.
-        """
-        def safe_get(df, key):
-            return df[key] if key in df else pd.Series(0, index=df.index)
-
-        # Total Assets data is reliable.
-        total_assets = safe_get(fundamentals, 'total_assets').replace(0, 1e-6)
-        
-        # Sales data has ~55% coverage, which is the best available for a profitability proxy.
-        sales = safe_get(fundamentals, 'sales_per_share') * safe_get(fundamentals, 'shares_outstanding')
-        
-        # Asset Turnover = Sales / Total Assets. Higher is better.
-        asset_turnover = sales / total_assets
-        
-        composite = asset_turnover.fillna(0)
-        return self._cross_sectional_rank(composite)
-
-    def _calculate_volatility_factor(self, prices: pd.DataFrame) -> pd.Series:
-        if prices.shape[0] < 252: return pd.Series(0, index=prices.columns)
-        returns = prices.pct_change()
-        volatility = returns.rolling(252, min_periods=126).std().iloc[-1] * np.sqrt(252)
-        return self._cross_sectional_rank(-volatility) # Lower volatility is better
-
-    def _calculate_ivol_factor(self, prices: pd.DataFrame, market_prices: pd.Series = None) -> pd.Series:
-        if market_prices is None or prices.shape[0] < 60: return pd.Series(0, index=prices.columns)
-        returns = prices.pct_change().dropna()
-        market_returns = market_prices.pct_change().dropna()
-        common_dates = returns.index.intersection(market_returns.index)
-        returns, market_returns = returns.loc[common_dates], market_returns.loc[common_dates]
-
-        ivol_vals = {}
-        lr = LinearRegression()
-        X = market_returns.values.reshape(-1, 1)
-        for ticker in prices.columns:
-            if ticker in returns.columns and not returns[ticker].isnull().all():
-                y = returns[ticker].values
-                try:
-                    lr.fit(X, y)
-                    residuals = y - lr.predict(X)
-                    ivol_vals[ticker] = np.std(residuals) * np.sqrt(252)
-                except Exception:
-                    ivol_vals[ticker] = np.nan
-            else:
-                ivol_vals[ticker] = np.nan
-        return self._cross_sectional_rank(-pd.Series(ivol_vals)) # Lower IVOL is better
-
-    def _calculate_volume_momentum(self, volumes: pd.DataFrame) -> pd.Series:
-        if volumes.shape[0] < 252: return pd.Series(0, index=volumes.columns)
-        avg_vol_12m = volumes.rolling(252, min_periods=126).mean()
-        avg_vol_1m = volumes.rolling(21, min_periods=10).mean()
-        volume_momentum = (avg_vol_1m.iloc[-1] / avg_vol_12m.iloc[-1].add(1e-6)) - 1
-        return self._cross_sectional_rank(volume_momentum)
-
-    def _calculate_volume_trend(self, volumes: pd.DataFrame) -> pd.Series:
-        if volumes.shape[0] < 60: return pd.Series(0, index=volumes.columns)
-        log_volumes = np.log1p(volumes.iloc[-60:])
-        time_trend = np.arange(len(log_volumes))
-        slopes = {ticker: np.polyfit(time_trend, log_volumes[ticker].dropna(), 1)[0] 
-                  for ticker in log_volumes.columns if len(log_volumes[ticker].dropna()) > 1}
-        return self._cross_sectional_rank(pd.Series(slopes))
-
-    def _calculate_liquidity_factor(self, prices: pd.DataFrame, volumes: pd.DataFrame) -> pd.Series:
-        if prices.shape[0] < 63: return pd.Series(0, index=prices.columns)
-        avg_dollar_volume = (prices * volumes).iloc[-63:].mean()
-        return self._cross_sectional_rank(avg_dollar_volume)
-
-    def _calculate_volume_volatility(self, volumes: pd.DataFrame) -> pd.Series:
-        if volumes.shape[0] < 126: return pd.Series(0, index=volumes.columns)
-        log_volumes = np.log1p(volumes)
-        volume_vol = log_volumes.rolling(126, min_periods=63).std().iloc[-1]
-        return self._cross_sectional_rank(-volume_vol) # Lower is better
+        # Lower asset growth is considered better
+        return -asset_growth, capex_growth
 
     def calculate_factors_for_date(self, prices: pd.DataFrame, volumes: pd.DataFrame, market_caps: pd.DataFrame, fundamentals: pd.DataFrame,
                              historical_fundamentals: Dict[str, pd.DataFrame], market_prices: pd.Series = None) -> pd.DataFrame:
         """Calculates all factors for a given date and returns a DataFrame."""
-        # Cache market caps for the predict step
         self.latest_market_caps = market_caps.iloc[-1] if not market_caps.empty else pd.Series(dtype=float)
-
-        tickers = prices.columns.tolist()
-        logger.info(f"Calculating factors for {len(tickers)} tickers.")
-        expected_index = pd.Index(tickers)
-
-        # Align fundamentals to the same index as prices
-        fundamentals = fundamentals.reindex(tickers)
-
-        factors = {}
-        factor_methods = {
-            'momentum': self._calculate_momentum_factors, 'value': self._calculate_value_factors,
-            'quality': self._calculate_quality_factors, 'investment': self._calculate_investment_factor,
-            'profitability': self._calculate_profitability_factors, 'volatility': self._calculate_volatility_factor,
-            'ivol': self._calculate_ivol_factor, 'volume_momentum': self._calculate_volume_momentum,
-            'volume_trend': self._calculate_volume_trend, 'liquidity': self._calculate_liquidity_factor,
-            'volume_volatility': self._calculate_volume_volatility
-        }
-        method_args = {
-            'momentum': (prices,), 'value': (fundamentals, prices.iloc[-1]),
-            'quality': (fundamentals, historical_fundamentals), 'investment': (historical_fundamentals,),
-            'profitability': (fundamentals,), 'volatility': (prices,),
-            'ivol': (prices, market_prices), 'volume_momentum': (volumes,),
-            'volume_trend': (volumes,), 'liquidity': (prices, volumes),
-            'volume_volatility': (volumes,)
-        }
-        for name, method in factor_methods.items():
-            logger.debug(f"Calculating factor: {name}")
-            try:
-                raw_factor = method(*method_args[name])
-                factors[name] = self._validate_and_align_factor(raw_factor, expected_index, name)
-                if factors[name].isnull().all():
-                    logger.warning(f"Factor '{name}' is all NaN after calculation and alignment.")
-            except Exception as e:
-                logger.error(f"Error calculating factor '{name}': {e}", exc_info=True)
-                factors[name] = pd.Series(0, index=expected_index)
         
-        factors_df = pd.DataFrame(factors, index=expected_index).fillna(0)
-        logger.info("Factor calculation complete.")
-        return factors_df
+        # Align fundamentals to the same index as prices
+        fundamentals = fundamentals.reindex(prices.columns)
+
+        b2p, e2p, s2p, c2p = self._calculate_value_factors(fundamentals, self.latest_market_caps)
+        roe, lev, roe_stab = self._calculate_quality_factors(fundamentals, historical_fundamentals)
+        gpa, opm, npm = self._calculate_profitability_factors(fundamentals)
+        mom, acc, vol_mom = self._calculate_momentum_factors(prices)
+        inv, capex_g = self._calculate_investment_factors(historical_fundamentals)
+
+        all_factors = pd.DataFrame({
+            'B2P': b2p, 'E2P': e2p, 'S2P': s2p, 'C2P': c2p,
+            'ROE': roe, 'Leverage': lev, 'ROE_Stability': roe_stab,
+            'GPA': gpa, 'OPM': opm, 'NPM': npm,
+            'Momentum': mom, 'Acceleration': acc, 'Vol_Momentum': vol_mom,
+            'Investment': inv, 'CAPEX_Growth': capex_g
+        })
+
+        # Align all factors to the master price index, then clean and standardize
+        all_factors = all_factors.reindex(prices.columns)
+        all_factors = all_factors.apply(self._winsorize, axis=0).apply(self._standardize, axis=0)
+        
+        final_factors = all_factors.fillna(0)
+        logger.info(f"Successfully calculated {final_factors.shape[1]} factors for {final_factors.shape[0]} tickers.")
+        return final_factors
 
     def train(self, factor_panel: pd.DataFrame, forward_returns: pd.Series):
         """
@@ -243,20 +167,18 @@ class FactorEngine:
         n_components = self.settings.get('n_pca_components', 5)
 
         aligned_factors, aligned_returns = factor_panel.align(forward_returns, join='inner', axis=0)
-        aligned_factors.dropna(inplace=True)
-        aligned_returns = aligned_returns.loc[aligned_factors.index]
-
-        if aligned_factors.empty:
-            logger.error("Factor and return data do not align or are empty. Model cannot be trained.")
+        
+        # Drop rows where the return is NaN, and then align factors to the remaining returns
+        aligned_returns.dropna(inplace=True)
+        aligned_factors = aligned_factors.loc[aligned_returns.index].dropna(how='all')
+        
+        if aligned_factors.empty or len(aligned_factors) < n_components:
+            logger.error(f"Not enough data to train. Have {len(aligned_factors)} samples, need at least {n_components} for PCA. Aborting.")
             return
 
         self.feature_names = aligned_factors.columns.tolist()
         X = aligned_factors
-        y = aligned_returns
-
-        if len(X) < n_components * 10:
-            logger.error(f"Not enough data to train a reliable model (have {len(X)} rows). Aborting training.")
-            return
+        y = aligned_returns.loc[X.index]
 
         self.model = Pipeline([
             ('scaler', StandardScaler()),
@@ -294,17 +216,13 @@ class FactorEngine:
             neutralized_scores = scores_series
         else:
             market_caps = self.latest_market_caps.reindex(scores_series.index)
-            logger.info(f"Market cap summary for neutralization:\n{market_caps.describe()}")
-            combined_data = pd.concat([scores_series, market_caps], axis=1)
-            combined_data.columns = ['alpha', 'market_cap']
-            combined_data.dropna(inplace=True)
+            combined_data = pd.DataFrame({'alpha': scores_series, 'market_cap': market_caps}).dropna()
 
-            if combined_data.empty or len(combined_data) < 2:
-                 logger.warning("Not enough data for neutralization after merging with market caps. Skipping.")
+            if len(combined_data) < 2:
+                 logger.warning("Not enough data for neutralization. Skipping.")
                  neutralized_scores = scores_series
             else:
                 combined_data['is_small_cap'] = (combined_data['market_cap'] < self.small_cap_threshold).astype(int)
-                logger.info(f"Small-cap indicator distribution (1=Small, 0=Large):\n{combined_data['is_small_cap'].value_counts(normalize=True)}")
                 if combined_data['is_small_cap'].nunique() < 2:
                     logger.warning("No variance in small-cap indicator. Skipping neutralization.")
                     neutralized_scores = scores_series.reindex(combined_data.index)
