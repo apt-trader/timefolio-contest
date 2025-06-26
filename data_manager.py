@@ -88,7 +88,7 @@ class DataManager:
 
             logger.info("Step 5: Fetching macroeconomic data...")
             for dt in pd.date_range(start=self.start_date, end=self.end_date):
-                self._macro.fetch_and_store(dt.strftime('%Y-%m-%d'), kospi_prices=self.market_prices)
+                self._macro.fetch_and_store(dt.strftime('%Y-%m-%d'))
             macro_query = f"SELECT * FROM macro_data WHERE date BETWEEN '{self.start_date.strftime('%Y-%m-%d')}' AND '{self.end_date.strftime('%Y-%m-%d')}'"
             self.macro_data = pd.read_sql(macro_query, self.conn, index_col='date', parse_dates=['date'])
             logger.info("Step 5 SUCCESS: Macroeconomic data fetched and loaded.")
@@ -98,7 +98,7 @@ class DataManager:
                 return False
 
             logger.info("Step 6: Aligning and processing final dataframes...")
-            self._align_data()
+            self._align_and_process_data()
             self._calculate_and_fill_returns()
             logger.info("Step 6 SUCCESS: Data aligned and returns calculated.")
             
@@ -108,6 +108,63 @@ class DataManager:
         except Exception as e:
             logger.exception(f"A critical error occurred during the data loading sequence: {e}")
             return False
+
+    def _align_and_process_data(self):
+        """
+        Aligns all time-series data to a common date index and ticker columns.
+        This ensures consistency before any calculations are performed.
+        """
+        logger.info("Aligning all dataframes to a common index...")
+        if self.prices.empty:
+            logger.error("Cannot align data, prices dataframe is empty.")
+            return
+
+        master_index = self.prices.index
+        master_columns = self.prices.columns
+
+        self.prices = self.prices.reindex(index=master_index, columns=master_columns).ffill()
+        self.volumes = self.volumes.reindex(index=master_index, columns=master_columns).fillna(0)
+        self.market_caps = self.market_caps.reindex(index=master_index, columns=master_columns).ffill()
+        self.market_prices = self.market_prices.reindex(master_index).ffill()
+        self.macro_data = self.macro_data.reindex(master_index).ffill()
+
+        self.prices.bfill(inplace=True)
+        self.market_caps.bfill(inplace=True)
+        self.market_prices.bfill(inplace=True)
+        self.macro_data.bfill(inplace=True)
+        logger.info("Data alignment complete.")
+
+    def _calculate_and_fill_returns(self):
+        """Calculates daily returns and handles infinite values."""
+        logger.info("Calculating daily returns...")
+        if self.prices.empty:
+            logger.error("Cannot calculate returns, prices dataframe is empty.")
+            self.returns = pd.DataFrame()
+            return
+
+        self.returns = self.prices.pct_change().fillna(0)
+        self.returns.replace([np.inf, -np.inf], np.nan, inplace=True)
+        self.returns.fillna(0, inplace=True)
+        logger.info("Daily returns calculated and cleaned.")
+
+    def _log_data_quality(self):
+        """Logs summary statistics and data quality metrics."""
+        logger.info("--- Data Quality Report ---")
+        if not self.prices.empty:
+            total_datapoints = self.prices.size
+            missing_prices = self.prices.isnull().sum().sum()
+            logger.info(f"Price Data: {self.prices.shape[0]} days, {self.prices.shape[1]} tickers.")
+            logger.info(f"Missing Price Points: {missing_prices} ({missing_prices/total_datapoints:.2%})")
+        else:
+            logger.warning("Price data is empty.")
+        if not self.latest_fundamentals.empty:
+            logger.info(f"Latest Fundamentals: {self.latest_fundamentals.shape[0]} tickers, {self.latest_fundamentals.shape[1]} fields.")
+            missing_fundamentals = self.latest_fundamentals.isnull().sum()
+            if (missing_fundamentals > 0).any():
+                logger.debug(f"Missing fundamental data points per field:\n{missing_fundamentals[missing_fundamentals > 0]}")
+        else:
+            logger.warning("Latest fundamentals data is empty.")
+        logger.info("--- End of Report ---")
 
     def _load_market_data(self) -> bool:
         """Loads prices, volumes, and market caps for the final universe from the database."""
