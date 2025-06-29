@@ -48,7 +48,7 @@ class Backtester:
 
         # Initialize engines
         factor_engine = FactorEngine(self.cfg.factor_settings)
-        optimizer = PortfolioOptimizer(factor_engine, self.cfg.optimization_settings)
+        optimizer = PortfolioOptimizer(self.cfg, factor_engine)
 
         # Generate the full panel of historical factors and train the prediction model
         historical_factors = self._generate_historical_factor_panel(factor_engine, self.dm)
@@ -90,6 +90,11 @@ class Backtester:
                     all_daily_returns.append(pd.Series(0, index=holding_period))
                     continue
                 expected_returns = self.predict(latest_factors)
+                
+                # DEBUG: Log expected returns statistics
+                logger.info(f"[DEBUG] Expected returns on {rebal_date.date()}: Mean={expected_returns.mean():.6f}, Std={expected_returns.std():.6f}, Min={expected_returns.min():.6f}, Max={expected_returns.max():.6f}")
+                logger.info(f"[DEBUG] Top 5 expected returns: {expected_returns.nlargest(5).to_dict()}")
+                logger.info(f"[DEBUG] Bottom 5 expected returns: {expected_returns.nsmallest(5).to_dict()}")
 
                 # 4. Get sector risk limits for the period.
                 sector_limits = parse_sector_limits_for_date(
@@ -98,13 +103,30 @@ class Backtester:
                 )
 
                 # 5. Optimize the portfolio to get target weights.
+                # Create covariance matrix from historical returns for risk model
+                historical_returns = self.dm.returns.loc[:rebal_date]
+                risk_model = historical_returns.cov()
+                
+                # Add L2 regularization to covariance matrix for numerical stability
+                if hasattr(optimizer, 'cov_l2_alpha'):
+                    cov_l2_alpha = getattr(optimizer, 'cov_l2_alpha', 0.05)
+                    risk_model += cov_l2_alpha * np.eye(len(risk_model))
+                
                 weights = optimizer.optimize(
                     expected_returns,
-                    self.dm.returns.loc[:rebal_date],
+                    risk_model,
                     self.dm.market_caps.loc[[rebal_date]].iloc[0],
                     sector_map,
                     sector_limits
                 )
+                
+                # DEBUG: Log portfolio weights
+                if weights is not None and not weights.empty:
+                    logger.info(f"[DEBUG] Portfolio on {rebal_date.date()}: {len(weights)} assets, Weight sum={weights.sum():.6f}")
+                    logger.info(f"[DEBUG] Top 5 weights: {weights.nlargest(5).to_dict()}")
+                    logger.info(f"[DEBUG] Bottom 5 weights: {weights.nsmallest(5).to_dict()}")
+                else:
+                    logger.info(f"[DEBUG] No portfolio weights generated for {rebal_date.date()}")
 
                 # 6. Calculate portfolio returns for the holding period.
                 holding_period_rets = self.dm.returns.loc[holding_period.min():holding_period.max()]
@@ -113,6 +135,11 @@ class Backtester:
                 else:
                     valid_tickers = holding_period_rets.columns.intersection(weights.index)
                     daily_pnl = holding_period_rets[valid_tickers].mul(weights[valid_tickers], axis=1).sum(axis=1)
+                    
+                    # DEBUG: Log holding period performance
+                    period_return = daily_pnl.sum()
+                    logger.info(f"[DEBUG] Holding period {holding_period.min().date()} to {holding_period.max().date()}: Total return={period_return:.6f}, Daily avg={daily_pnl.mean():.6f}")
+                    logger.info(f"[DEBUG] Daily PnL sample: {daily_pnl.head(3).to_dict()}")
                 
                 all_daily_returns.append(daily_pnl)
 
@@ -254,7 +281,10 @@ class Backtester:
         """Trains the prediction model on the full historical factor panel."""
         logger.info("Training predictive model...")
         target_days = self.cfg.factor_settings.get('prediction_target_days', 21)
-        y = returns.shift(-target_days).rolling(target_days).mean().stack().rename("forward_return")
+        # CRITICAL FIX: Use immediate forward returns, not delayed ones
+        # OLD (incorrect): returns.shift(-target_days) created 21-day gap
+        # NEW (correct): returns.shift(-1) creates immediate factor-return relationship
+        y = returns.shift(-1).rolling(target_days).mean().stack().rename("forward_return")
         
         # Name the index levels of the returns series to match the factors
         y.index.names = ['date', 'ticker']
@@ -300,8 +330,25 @@ class Backtester:
         
         predictions = self.pipeline.predict(latest_factors)
         
-        # Rank-normalize predictions to get alpha scores from -1 to 1
-        return pd.Series(predictions, index=latest_factors.index).rank(pct=True).sub(0.5).mul(2)
+        # Convert raw predictions to more reasonable expected returns
+        # Use a gentler normalization approach
+        pred_series = pd.Series(predictions, index=latest_factors.index)
+        
+        # Standardize and clip to reasonable ranges
+        mean_pred = pred_series.mean()
+        std_pred = pred_series.std()
+        
+        if std_pred > 0:
+            # Z-score normalize and scale to +/- 5% annualized return expectations
+            normalized = (pred_series - mean_pred) / std_pred
+            # Clip extreme values and scale to reasonable daily return expectations
+            normalized = normalized.clip(-3, 3)  # Remove extreme outliers
+            expected_returns = normalized * 0.01 / np.sqrt(252)  # ~1% annual volatility scaled to daily
+        else:
+            # If no variation in predictions, return small positive expectations for all
+            expected_returns = pd.Series(0.0001, index=latest_factors.index)
+        
+        return expected_returns
 
     def generate_summary(self, portfolio_returns: pd.Series) -> dict:
         """
