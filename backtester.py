@@ -10,8 +10,9 @@ from copy import deepcopy
 from typing import Optional
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
 from sklearn.decomposition import PCA
-from sklearn.linear_model import RidgeCV
+from sklearn.linear_model import RidgeCV, LinearRegression
 
 sys.path.insert(0, str(Path(__file__).parent))
 from config import Config
@@ -25,16 +26,22 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("Backtester")
 
 class Backtester:
-    def __init__(self, cfg: Config, start_date: str, end_date: str, rebalance_freq: str = 'W-MON'):
+    def __init__(self, cfg: Config, start_date: str, end_date: str, rebalance_freq: str = 'W-MON', dm: Optional[DataManager] = None):
         self.cfg = cfg
         self.start_date = pd.to_datetime(start_date)
         self.end_date = pd.to_datetime(end_date)
         self.rebalance_freq = rebalance_freq
-        self.pipeline = None  # The ML model will live here
-        # Initialize DataManager in backtest mode
-        self.dm = self._load_data_for_backtest()
+        self.pipeline = None
+
+        if dm:
+            self.dm = dm
+            logger.info("Backtester initialized with a pre-loaded DataManager.")
+        else:
+            logger.info("No pre-loaded DataManager provided. Initializing a new one.")
+            self.dm = self._load_data_for_backtest()
+        
         if not self.dm:
-            raise RuntimeError("Failed to initialize DataManager for backtest.")
+            raise RuntimeError("Failed to initialize or receive a valid DataManager.")
 
     def run(self) -> dict:
         logger.info(f"Starting backtest from {self.start_date.date()} to {self.end_date.date()}...")
@@ -86,7 +93,7 @@ class Backtester:
 
                 # 4. Get sector risk limits for the period.
                 sector_limits = parse_sector_limits_for_date(
-                    self.cfg.data_settings['sector_file_path'],
+                    self.cfg.data_settings['market_sectors_file'],
                     target_date=rebal_date
                 )
 
@@ -94,7 +101,7 @@ class Backtester:
                 weights = optimizer.optimize(
                     expected_returns,
                     self.dm.returns.loc[:rebal_date],
-                    self.dm.market_caps.loc[rebal_date],
+                    self.dm.market_caps.loc[[rebal_date]].iloc[0],
                     sector_map,
                     sector_limits
                 )
@@ -124,13 +131,19 @@ class Backtester:
     def _load_data_for_backtest(self) -> Optional[DataManager]:
         """Loads data for the entire backtest period plus a lookback."""
         dm_config = deepcopy(self.cfg)
-        dm_config.start_date = (self.start_date - pd.DateOffset(years=2)).strftime('%Y-%m-%d')
-        dm_config.end_date = self.end_date.strftime('%Y-%m-%d')
-        # Initialize DataManager in backtest mode
+        # Set the date range for the DataManager to load all necessary historical data
+        dm_config.data_settings['start_date'] = (self.start_date - pd.DateOffset(years=2)).strftime('%Y-%m-%d')
+        dm_config.data_settings['end_date'] = self.end_date.strftime('%Y-%m-%d')
+        
+        # Initialize DataManager in backtest mode with the adjusted config
         dm = DataManager(dm_config, backtest_mode=True)
+        
+        # Load all the data required for the backtest period
+        logger.info("Backtester is attempting to call DataManager.load_data()...")
         if not dm.load_data():
             logger.critical("Backtest failed: Initial data load failed.")
             return None
+            
         return dm
         
     def _generate_historical_factor_panel(self, factor_engine: FactorEngine, dm: DataManager) -> pd.DataFrame:
@@ -138,53 +151,73 @@ class Backtester:
         logger.info("Generating historical point-in-time factors for model training...")
         factor_list = []
         
-        # Ensure we have valid data
         if dm.prices.empty or dm.volumes.empty or dm.market_caps.empty or not dm.historical_fundamentals:
             logger.error("Missing required data for factor calculation")
             return pd.DataFrame()
+
+        start_date = pd.to_datetime(self.cfg.start_date)
+        end_date = pd.to_datetime(self.cfg.end_date)
+        relevant_dates = dm.prices.loc[start_date:end_date].index
             
-        for i in tqdm(range(252, len(dm.prices)), desc="Calculating Historical Factors"):
+        for date in tqdm(relevant_dates, desc="Calculating Historical Factors"):
             try:
-                date = dm.prices.index[i]
+                # 1. Get market caps for the current date, skipping if not available.
+                try:
+                    market_caps_for_date = dm.market_caps.loc[date]
+                    if not isinstance(market_caps_for_date, pd.Series):
+                        continue
+                except KeyError:
+                    continue
                 
-                # Get point-in-time fundamentals
-                pit_fundamentals = []
+                if market_caps_for_date.empty:
+                    continue
+
+                # 2. Get point-in-time fundamentals for all tickers.
+                pit_fundamentals_dict = {}
                 for ticker, hist_df in dm.historical_fundamentals.items():
                     if ticker not in dm.prices.columns:
                         continue
-                    mask = hist_df.index.to_series().dt.date <= date.date()
+                    
+                    if not isinstance(hist_df.index, pd.DatetimeIndex):
+                        try:
+                            hist_df.index = pd.to_datetime(hist_df.index)
+                        except Exception:
+                            logger.warning(f"Could not convert index to DatetimeIndex for {ticker}. Skipping.")
+                            continue
+
+                    mask = hist_df.index.date <= date.date()
                     if not mask.any():
                         continue
+                    
                     try:
                         latest = hist_df.loc[mask].iloc[-1]
-                        latest.name = ticker  # Use ticker as the index
-                        pit_fundamentals.append(latest)
+                        pit_fundamentals_dict[ticker] = latest
                     except Exception as e:
                         logger.debug(f"Error processing fundamentals for {ticker} on {date}: {e}")
+
+
                 
-                if not pit_fundamentals:
-                    continue
-                    
-                # Create DataFrame with tickers as index
-                pit_fundamentals_df = pd.DataFrame(pit_fundamentals)
+                pit_fundamentals_df = pd.DataFrame.from_dict(pit_fundamentals_dict, orient='index')
                 
-                # Calculate factors for this date
+                # 3. Get historical price and volume data up to the current date.
+                prices_up_to_date = dm.prices.loc[:date]
+                volumes_up_to_date = dm.volumes.loc[:date]
+
+                # 4. Calculate factors for the current date.
                 factors = factor_engine.calculate_factors_for_date(
-                    prices=dm.prices.iloc[:i+1],
-                    volumes=dm.volumes.iloc[:i+1],
-                    market_caps=dm.market_caps.loc[date],
+                    date=date,
+                    prices=prices_up_to_date,
+                    volumes=volumes_up_to_date,
+                    market_caps=market_caps_for_date,
                     fundamentals=pit_fundamentals_df,
                     historical_fundamentals=dm.historical_fundamentals
                 )
                 
+                # 5. Append a copy of the factors to the list.
                 if not factors.empty:
-                    # Ensure we have a proper MultiIndex with date and ticker
-                    factors = factors.copy()
                     factors['date'] = date
-                    factors = factors.reset_index()
-                    if 'index' in factors.columns:
-                        factors = factors.rename(columns={'index': 'ticker'})
-                    factor_list.append(factors)
+                    factors['ticker'] = factors.index
+                    factor_list.append(factors.copy())
                     
             except Exception as e:
                 logger.error(f"Error processing date {date}: {e}", exc_info=True)
@@ -193,22 +226,28 @@ class Backtester:
         if not factor_list:
             logger.error("Failed to generate any historical factors.")
             return pd.DataFrame()
-            
+
         try:
-            # Concatenate all factor DataFrames
-            result = pd.concat(factor_list, ignore_index=False)
-            
-            # Ensure we have the required columns for the MultiIndex
-            if 'ticker' not in result.columns or 'date' not in result.columns:
-                logger.error("Missing required columns 'ticker' or 'date' in factor data")
+            logger.info(f"Factor list contains {len(factor_list)} DataFrames before concatenation.")
+            if not factor_list:
+                logger.error("Factor list is empty. Cannot create panel.")
                 return pd.DataFrame()
-                
-            # Set MultiIndex and sort
-            result = result.set_index(['date', 'ticker']).sort_index()
-            return result
+
+            # Diagnostic logging
+            first_df_date = factor_list[0]['date'].iloc[0]
+            last_df_date = factor_list[-1]['date'].iloc[0]
+            logger.info(f"Date in first DataFrame: {first_df_date}. Date in last DataFrame: {last_df_date}.")
+
+            factor_panel = pd.concat(factor_list, ignore_index=True)
+            factor_panel.set_index(['date', 'ticker'], inplace=True)
+            factor_panel.sort_index(inplace=True)
+            
+            min_date, max_date = factor_panel.index.get_level_values('date').min(), factor_panel.index.get_level_values('date').max()
+            logger.info(f"Successfully generated historical factor panel with shape: {factor_panel.shape}. Date range: {min_date} to {max_date}")
+            return factor_panel
             
         except Exception as e:
-            logger.error(f"Error concatenating factor data: {e}", exc_info=True)
+            logger.error(f"Error creating final factor panel: {e}", exc_info=True)
             return pd.DataFrame()
 
     def _train_model(self, historical_factors: pd.DataFrame, returns: pd.DataFrame):
@@ -220,32 +259,48 @@ class Backtester:
         # Name the index levels of the returns series to match the factors
         y.index.names = ['date', 'ticker']
 
-        # Debugging: Log index names and check for uniqueness
-        logger.info(f"Aligning factors with index names: {historical_factors.index.names}")
-        logger.info(f"Aligning returns with index names: {y.index.names}")
-        logger.info(f"Factors index is unique: {historical_factors.index.is_unique}")
-        logger.info(f"Returns index is unique: {y.index.is_unique}")
-
-        if not historical_factors.index.is_unique:
-            duplicates = historical_factors.index[historical_factors.index.duplicated()].unique()
-            logger.warning(f"Found {len(duplicates)} duplicate indices in historical_factors. Example: {duplicates[:5].tolist()}")
+        # Ensure the 'ticker' level of the index is string type for alignment
+        if len(y.index.levels) > 1:
+            y.index = y.index.set_levels(y.index.levels[1].astype(str), level='ticker')
 
         # Align factors and returns
-        X, y = historical_factors.align(y, join='inner', axis=0)
-        if X.empty: raise ValueError("No aligned data for training.")
-        
+        aligned_X, aligned_y = historical_factors.align(y, join='inner', axis=0)
+
+        if aligned_X.empty or aligned_y.empty:
+            err_msg = "Factor and return data alignment resulted in empty DataFrames. Cannot train model."
+            logger.error(err_msg)
+            raise ValueError(err_msg)
+
+        n_features = aligned_X.shape[1]
+        # Get n_components from config, default to n_features if not present
+        n_pca_components = self.cfg.factor_settings.get('n_pca_components', n_features)
+
+        # PCA n_components cannot be greater than the number of features
+        effective_n_components = min(n_pca_components, n_features)
+
+        if effective_n_components < n_pca_components:
+            logger.warning(
+                f"Requested PCA components ({n_pca_components}) exceeds number of features ({n_features}). "
+                f"Using {effective_n_components} components instead."
+            )
+
         self.pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='mean')),
             ('scaler', StandardScaler()),
-            ('pca', PCA(n_components=self.cfg.factor_settings.get('n_pca_components', 5))),
-            ('model', RidgeCV(alphas=np.logspace(-4, 4, 10)))
+            ('pca', PCA(n_components=effective_n_components)),
+            ('regressor', LinearRegression())
         ])
-        self.pipeline.fit(X, y)
+        self.pipeline.fit(aligned_X, aligned_y)
         logger.info("Model training complete.")
 
     def predict(self, latest_factors: pd.DataFrame) -> pd.Series:
         """Generates predictions using the pre-trained model."""
-        if self.pipeline is None: raise RuntimeError("Model is not trained.")
+        if self.pipeline is None:
+            raise RuntimeError("Model is not trained.")
+        
         predictions = self.pipeline.predict(latest_factors)
+        
+        # Rank-normalize predictions to get alpha scores from -1 to 1
         return pd.Series(predictions, index=latest_factors.index).rank(pct=True).sub(0.5).mul(2)
 
     def generate_summary(self, portfolio_returns: pd.Series) -> dict:
