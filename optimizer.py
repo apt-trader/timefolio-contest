@@ -1,335 +1,185 @@
-# optimizer.py
-import logging
-import sys
-import numpy as np
 import pandas as pd
+import numpy as np
+import statsmodels.api as sm
 import cvxpy as cp
 from sklearn.covariance import LedoitWolf
+from config import Config
+from data_manager import DataManager
+import logging
 from typing import Dict, Any, Optional, List, Tuple
-from factor_engine import FactorEngine
 
 logger = logging.getLogger(__name__)
 
 class PortfolioOptimizer:
-    def __init__(self, factor_engine: FactorEngine, settings: Dict[str, Any]):
-        """Initialize PortfolioOptimizer with optimization settings."""
-        self.factor_engine = factor_engine
-        self.settings = settings
-        self.max_positions = settings.get('max_positions', 12)
-        self.max_weight = settings.get('individual_limit', 0.15)
-        self.min_weight = settings.get('min_weight', 0.01)
-        self.risk_aversion = settings.get('risk_aversion', 1.0)
-        self.l2_penalty = settings.get('l2_penalty', 0.1)
-        self.small_cap_threshold = settings.get('small_cap_threshold', 1e12)
-        self.max_small_cap_weight = settings.get('max_small_cap_weight', 0.4)
-        self.verbose = settings.get('verbose', False)
-        self.cov_l2_alpha = settings.get('cov_l2_alpha', 0.05) # Regularization for covariance matrix
+    """
+    Handles portfolio construction and optimization.
+    """
+    def __init__(self, cfg: Config, dm: DataManager):
+        """
+        Initializes the PortfolioOptimizer.
+        """
+        self.cfg = cfg
+        self.dm = dm
+        self.model = None
         
-        # Check if we're in tuning mode (skip small-cap restrictions)
-        self.skip_rules = 'tuner' in sys.modules or 'optuna' in sys.modules
-        if self.skip_rules:
-            logger.info("Tuning mode detected. Small-cap restrictions will be skipped.")
+        # Load optimization settings
+        opt_cfg = self.cfg.optimization_settings
+        self.max_positions = opt_cfg.get('max_positions', 50)
+        self.max_weight = opt_cfg.get('max_weight', 0.05)
+        self.risk_aversion = opt_cfg.get('risk_aversion', 1.0)
+        self.l2_penalty = opt_cfg.get('l2_penalty', 0.0)
+        self.skip_rules = opt_cfg.get('skip_rules', False)
+        self.verbose = opt_cfg.get('verbose', False)
         
-    def _validate_inputs(self, expected_returns: pd.Series, 
-                        returns_df: pd.DataFrame,
-                        market_caps: pd.Series,
-                        sector_map: Dict[str, str],
-                        sector_limits: Dict[str, float]) -> None:
-        """Validate input data before optimization."""
-        if not isinstance(expected_returns, pd.Series) or expected_returns.isna().any():
-            raise ValueError("Expected returns must be a pandas Series with no NaN values")
-        if not isinstance(returns_df, pd.DataFrame) or returns_df.isna().any().any():
-            raise ValueError("Returns DataFrame must not contain NaN values")
-        if not isinstance(market_caps, pd.Series) or market_caps.isna().any():
-            raise ValueError("Market caps must be a pandas Series with no NaN values")
+        # Load risk settings
+        risk_cfg = self.cfg.risk_settings
+        self.small_cap_threshold = risk_cfg.get('small_cap_threshold', 1e9)
+        self.max_small_cap_weight = risk_cfg.get('max_small_cap_weight', 0.1)
+
+        logger.info("PortfolioOptimizer initialized.")
+
+    def set_model(self, model):
+        """
+        Sets the trained factor model.
+        """
+        self.model = model
+        logger.info("Factor model has been set in the optimizer.")
+
+    def predict_returns(self, factors: pd.DataFrame) -> pd.Series:
+        """
+        Predicts expected returns using the trained factor model.
+        """
+        if self.model is None:
+            raise ValueError("Model must be set before predicting returns.")
+        
+        factors_with_const = sm.add_constant(factors, has_constant='add')
+        model_factors = self.model.model.exog_names
+        factors_aligned = factors_with_const.reindex(columns=model_factors, fill_value=0)
+        predicted_returns = self.model.predict(factors_aligned)
+        predicted_returns.name = 'expected_return'
+        return predicted_returns
+
+    def _get_valid_tickers(self, expected_returns: pd.Series, risk_model: pd.DataFrame, market_caps: pd.Series) -> pd.Index:
+        """
+        Finds the intersection of tickers that have expected returns, risk model, and market cap data.
+        """
+        valid_tickers = expected_returns.index.intersection(risk_model.index).intersection(market_caps.index)
+        logger.info(f"Found {len(valid_tickers)} valid tickers for optimization.")
+        return valid_tickers
+
+    def _validate_inputs(self, expected_returns: pd.Series, risk_model: pd.DataFrame, market_caps: pd.Series, sector_map: Dict[str, str], sector_limits: Dict[str, float]):
+        """
+        Validates the inputs for the optimization.
+        """
+        logger.info("Validating optimizer inputs...")
+        if not isinstance(expected_returns, pd.Series) or expected_returns.empty:
+            raise ValueError("`expected_returns` must be a non-empty pandas Series.")
+        if not isinstance(risk_model, pd.DataFrame) or risk_model.empty:
+            raise ValueError("`risk_model` must be a non-empty pandas DataFrame.")
+        if not isinstance(market_caps, pd.Series) or market_caps.empty:
+            raise ValueError("`market_caps` must be a non-empty pandas Series.")
         if not isinstance(sector_map, dict) or not sector_map:
-            raise ValueError("Sector map must be a non-empty dictionary")
+            raise ValueError("`sector_map` must be a non-empty dictionary.")
         if not isinstance(sector_limits, dict) or not sector_limits:
-            raise ValueError("Sector limits must be a non-empty dictionary")
-            
-    def _get_valid_tickers(self, expected_returns: pd.Series,
-                         returns_df: pd.DataFrame,
-                         market_caps: pd.Series,
-                         sector_map: Dict[str, str]) -> Tuple[pd.Index, Dict[str, str]]:
+            raise ValueError("`sector_limits` must be a non-empty dictionary.")
+        logger.info("Optimizer inputs validated successfully.")
+
+    def _get_sector_indices(self, tickers: pd.Index, sector_map: Dict[str, str], sector_limits: Dict[str, float]) -> Dict[str, List[int]]:
         """
-        Filters the initial universe from expected_returns to find tickers with
-        high-quality data suitable for optimization.
+        Get a mapping from sector to the integer indices of tickers in that sector.
         """
-        # Start with the universe of tickers for which we have an alpha signal
-        initial_universe = expected_returns.index.intersection(returns_df.columns)
-
-        if not initial_universe.any():
-            logger.warning("Initial universe is empty, no tickers with alpha signal to process.")
-            return pd.Index([]), {}
-
-        # --- Filter for High-Quality Data ---
-        # Use a 1-year lookback for quality checks
-        lookback_period = 252
-        recent_returns = returns_df[initial_universe].tail(lookback_period)
-
-        # Adjust threshold for shorter history, e.g., at the start of a backtest
-        actual_history_length = len(recent_returns)
-        min_obs_threshold = actual_history_length * 0.8  # Require 80% of available data
-
-        # Calculate valid observations and standard deviation for each ticker
-        valid_obs = recent_returns.notna().sum()
-        std_dev = recent_returns.std()
-
-        # Define quality thresholds
-        min_volatility_threshold = 1e-6
-
-        # Apply filters, filling NaN in std_dev for robust comparison
-        quality_mask = (valid_obs >= min_obs_threshold) & (std_dev.fillna(0) > min_volatility_threshold)
-        quality_tickers = valid_obs[quality_mask].index
-
-        # --- Intersection with other data ---
-        # Ensure tickers also have market cap and sector data
-        final_universe = quality_tickers.intersection(market_caps.index)
-        valid_tickers = [t for t in final_universe
-                        if t in sector_map and pd.notna(sector_map.get(t))]
-
-        valid_sector_map = {t: sector_map[t] for t in valid_tickers}
-
-        if len(valid_tickers) < self.max_positions:
-            logger.warning(
-                f"Found only {len(valid_tickers)} high-quality tickers, "
-                f"which is less than the target of {self.max_positions}."
-            )
-
-        return pd.Index(valid_tickers), valid_sector_map
-        
-    def _get_sector_indices(self, tickers: pd.Index, 
-                          sector_map: Dict[str, str],
-                          sector_limits: Dict[str, float]) -> Dict[str, List[int]]:
-        """Pre-compute sector indices for optimization constraints."""
-        sector_indices = {}
-        for sector in sector_limits:
-            sector_indices[sector] = [i for i, t in enumerate(tickers) 
-                                     if sector_map.get(t) == sector]
+        sector_indices = {sector: [] for sector in sector_limits}
+        for i, ticker in enumerate(tickers):
+            sector = sector_map.get(ticker)
+            if sector in sector_indices:
+                sector_indices[sector].append(i)
         return sector_indices
-        
-    def _get_covariance_matrix(self, returns_df: pd.DataFrame) -> np.ndarray:
-        """Calculate a robust, positive semi-definite covariance matrix using Ledoit-Wolf shrinkage."""
-        # Fill any remaining NaNs with 0 before fitting. This is a simplification, but more robust
-        # than dropping tickers, which could lead to index mismatches.
-        returns_filled = returns_df.fillna(0)
 
-        # Use Ledoit-Wolf shrinkage for a robust covariance estimate that is well-conditioned
-        lw = LedoitWolf(assume_centered=True)
-        lw.fit(returns_filled)
-        cov_matrix = lw.covariance_
-
-        cov_matrix *= 252  # Annualize
-        return (cov_matrix + cov_matrix.T) / 2 # Enforce symmetry for numerical stability
-
-    def _regularize_covariance(self, cov_matrix: np.ndarray) -> np.ndarray:
-        """Applies L2 regularization to the covariance matrix to ensure it is positive semi-definite."""
-        if self.cov_l2_alpha > 0:
-            # (1 - alpha) * Sigma + alpha * diag(Sigma)
-            # This shrinks the covariance matrix towards a diagonal matrix of its variances, improving conditioning.
-            regularized_cov = (1 - self.cov_l2_alpha) * cov_matrix + \
-                              self.cov_l2_alpha * np.diag(np.diag(cov_matrix))
-            logger.info(f"Applied L2 regularization to covariance matrix with alpha={self.cov_l2_alpha}.")
-            return regularized_cov
-        return cov_matrix
-
-    def optimize(self, expected_returns: pd.Series, 
-                returns_df: pd.DataFrame,
-                market_caps: pd.Series, 
-                sector_map: Dict[str, str],
-                sector_limits: Dict[str, float]) -> Optional[pd.Series]:
+    def optimize(self, expected_returns: pd.Series, risk_model: pd.DataFrame, market_caps: pd.Series, sector_map: Dict[str, str], sector_limits: Dict[str, float]) -> Optional[pd.Series]:
         """
-        Optimize portfolio weights using a mixed-integer programming approach.
-        
-        Args:
-            expected_returns: Expected returns for each asset
-            returns_df: Historical returns for covariance estimation
-            market_caps: Market capitalizations for each asset
-            sector_map: Mapping from ticker to sector
-            sector_limits: Maximum weight per sector
-            
-        Returns:
-            Optimized portfolio weights or None if optimization fails
+        Optimize portfolio weights using a two-step continuous optimization approach.
+        1. Pre-select a candidate universe of tickers based on expected returns.
+        2. Run a continuous QP optimization on the smaller universe.
         """
         try:
+            self._validate_inputs(expected_returns, risk_model, market_caps, sector_map, sector_limits)
+            
             # --- 1. Data Cleaning and Alignment ---
-            valid_tickers, valid_sector_map = self._get_valid_tickers(
-                expected_returns, returns_df, market_caps, sector_map
-            )
+            valid_tickers = self._get_valid_tickers(expected_returns, risk_model, market_caps)
 
-            if valid_tickers.empty:
-                logger.warning("No valid tickers found after filtering. Skipping optimization.")
-                return None
-            
-            # Filter all dataframes to the validated tickers
-            expected_returns = expected_returns.loc[valid_tickers]
-            returns_df = returns_df[valid_tickers]
-            market_caps = market_caps.loc[valid_tickers]
+            if len(valid_tickers) == 0:
+                logger.warning("No valid tickers after filtering. Cannot optimize.")
+                return pd.Series(dtype=float)
 
-            # --- 2. Validation ---
-            # The valid_sector_map is already validated by _get_valid_tickers
-            self._validate_inputs(expected_returns, returns_df, market_caps, valid_sector_map, sector_limits)
+            # --- 2. Pre-selection of Candidate Universe ---
+            # Create a smaller candidate universe to make optimization tractable
+            candidate_universe_size = self.max_positions * 5
+            if len(valid_tickers) > candidate_universe_size:
+                logger.info(f"Reducing optimization universe from {len(valid_tickers)} to top {candidate_universe_size} by expected returns.")
+                candidate_tickers = expected_returns.loc[valid_tickers].nlargest(candidate_universe_size).index
+            else:
+                logger.info(f"Using all {len(valid_tickers)} valid tickers as the candidate universe.")
+                candidate_tickers = valid_tickers
+            
+            if len(candidate_tickers) < self.max_positions:
+                logger.warning(f"Candidate universe size ({len(candidate_tickers)}) is less than target positions ({self.max_positions}).")
 
-            if len(valid_tickers) < self.max_positions:
-                logger.warning(f"Found only {len(valid_tickers)} high-quality tickers, which is less than the target of {self.max_positions}.")
-                return None
-                
-            # --- 3. Prepare Optimization Inputs ---
-            mu = expected_returns.values
-            returns_df = returns_df[valid_tickers]
-            caps = market_caps.values
+            # --- 3. Prepare Optimization Inputs for the Candidate Universe ---
+            mu = expected_returns.loc[candidate_tickers].values
+            cov_matrix = risk_model.loc[candidate_tickers, candidate_tickers].values
+            caps = market_caps.loc[candidate_tickers].values
+            
+            # Gracefully handle tickers missing from the sector map
+            sector_map = {ticker: sector_map.get(ticker, 'Unknown') for ticker in candidate_tickers}
+            sector_indices = self._get_sector_indices(candidate_tickers, sector_map, sector_limits)
 
-            cov_matrix = self._get_covariance_matrix(returns_df)
-            cov_matrix = self._regularize_covariance(cov_matrix)
-
-            # --- Diagnostic Logging ---
-            logger.info("--- Optimizer Input Diagnostics ---")
-            logger.info(f"Number of valid tickers: {len(valid_tickers)}")
-            logger.info(f"Expected returns (mu) shape: {mu.shape}")
-            logger.info(f"Expected returns summary:\n{pd.Series(mu).describe().to_string()}")
-            logger.info(f"NaNs in mu: {np.isnan(mu).sum()}")
-            logger.info(f"Infs in mu: {np.isinf(mu).sum()}")
-            logger.info(f"Covariance matrix shape: {cov_matrix.shape}")
-            logger.info(f"NaNs in cov_matrix: {np.isnan(cov_matrix).sum()}")
-            logger.info(f"Infs in cov_matrix: {np.isinf(cov_matrix).sum()}")
-            logger.info("--- End Diagnostics ---")
-            
-            sector_indices = self._get_sector_indices(valid_tickers, sector_map, sector_limits)
-            
-            # --- 4. Define Optimization Problem ---
-            n_assets = len(valid_tickers)
-            weights = cp.Variable(n_assets)
-            positions = cp.Variable(n_assets, boolean=True)
-            
-            # Objective function
-            portfolio_return = mu @ weights
-            portfolio_risk = cp.quad_form(weights, cp.psd_wrap(cov_matrix))
-            l2_reg = self.l2_penalty * cp.sum_squares(weights)
-            objective = cp.Maximize(portfolio_return - self.risk_aversion * portfolio_risk - l2_reg)
-            
-            # Constraints
-            constraints = [
-                cp.sum(weights) == 1,
-                cp.sum(positions) <= self.max_positions,
-                weights <= positions * self.max_weight,
-                weights >= positions * self.min_weight,
-            ]
-            
-            # Small-cap constraint (skip during tuning)
-            if not self.skip_rules and np.any(is_small_cap := (caps < self.small_cap_threshold)):
-                constraints.append(cp.sum(weights[is_small_cap]) <= self.max_small_cap_weight)
-                logger.debug("Applied small-cap weight constraint")
-            elif self.skip_rules and np.any(caps < self.small_cap_threshold):
-                logger.debug("Skipping small-cap weight constraint (tuning mode)")
-
-            # Sector constraints
-            if not self.skip_rules:
-                for sector, indices in sector_indices.items():
-                    if indices and sector in sector_limits:
-                        constraints.append(cp.sum(weights[indices]) <= sector_limits[sector])
-            
-            # --- 5. Solve Optimization ---
-            problem = cp.Problem(objective, constraints)
-            
+            # --- 4. Define and Solve Continuous QP --- 
             try:
-                # Use the SCIP solver for mixed-integer quadratic programs (MIQP)
-                logger.info("Attempting to solve the MIQP problem with SCIP...")
-                problem.solve(solver=cp.SCIP, verbose=self.verbose)
+                n_assets = len(candidate_tickers)
+                weights = cp.Variable(n_assets)
                 
-                if problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE] and weights.value is not None:
-                    logger.info("MIQP optimization with SCIP successful.")
-                    final_weights = pd.Series(weights.value, index=valid_tickers, name='weight')
-                    non_zero_weights = final_weights[final_weights > 1e-6]
-                    if not non_zero_weights.empty:
-                        # Return normalized weights
-                        return non_zero_weights / non_zero_weights.sum()
-                    else:
-                        logger.warning("SCIP solved but resulted in all zero weights. Will attempt fallback.")
-                else:
-                    logger.warning(f"SCIP solver finished with non-optimal status: {problem.status}. Will attempt fallback.")
-
-            except Exception as e:
-                logger.warning(f"Solver SCIP failed with an exception: {e}. Will attempt fallback.")
-
-            # --- Fallback to Continuous QP if MIQP Fails ---
-            logger.warning("MIQP solver failed. Falling back to a continuous QP.")
-            try:
-                weights_cont = cp.Variable(n_assets)
-                objective_cont = cp.Maximize(mu @ weights_cont - self.risk_aversion * cp.quad_form(weights_cont, cp.psd_wrap(cov_matrix)))
-                constraints_cont = [
-                    cp.sum(weights_cont) == 1,
-                    weights_cont >= 0,
+                portfolio_return = mu @ weights
+                portfolio_risk = cp.quad_form(weights, cp.psd_wrap(cov_matrix))
+                l2_reg = self.l2_penalty * cp.sum_squares(weights)
+                objective = cp.Maximize(portfolio_return - self.risk_aversion * portfolio_risk - l2_reg)
+                
+                constraints = [
+                    cp.sum(weights) == 1,
+                    weights <= self.max_weight,
+                    weights >= 0, # Remove min_weight constraint
                 ]
-                # Sector constraints
+
+                if not self.skip_rules and np.any(is_small_cap := (caps < self.small_cap_threshold)):
+                    constraints.append(cp.sum(weights[is_small_cap]) <= self.max_small_cap_weight)
+
                 if not self.skip_rules:
                     for sector, indices in sector_indices.items():
                         if indices and sector in sector_limits:
-                            constraints_cont.append(cp.sum(weights_cont[indices]) <= sector_limits[sector])
+                            constraints.append(cp.sum(weights[indices]) <= sector_limits[sector])
 
-                problem_cont = cp.Problem(objective_cont, constraints_cont)
-                problem_cont.solve(solver=cp.OSQP, verbose=self.verbose)
+                problem = cp.Problem(objective, constraints)
+                logger.info(f"Solving continuous QP problem for {n_assets} assets with OSQP...")
+                problem.solve(solver=cp.OSQP, verbose=self.verbose)
 
-                if problem_cont.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE] and weights_cont.value is not None:
-                    logger.info("Fallback continuous optimization successful.")
-                    fallback_weights = pd.Series(weights_cont.value, index=valid_tickers, name='weight')
-                    top_weights = fallback_weights.nlargest(self.max_positions)
-                    return top_weights / top_weights.sum()
-                else:
-                    logger.error(f"Fallback continuous QP also failed with status: {problem_cont.status}")
-                    return pd.Series(dtype='float64') # Return empty series on complete failure
+                if problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE] and weights.value is not None:
+                    # Select top N positions and re-normalize
+                    raw_weights = pd.Series(weights.value, index=candidate_tickers, name='weight')
+                    top_weights = raw_weights.nlargest(self.max_positions)
+                    if not top_weights.empty and top_weights.sum() > 0:
+                        final_weights = top_weights / top_weights.sum()
+                        logger.info(f"Successfully optimized portfolio with {len(final_weights)} assets.")
+                        return final_weights
+                
+                logger.warning(f"Continuous QP optimization failed or returned empty weights. Status: {problem.status}")
 
-            except Exception as fallback_e:
-                logger.error(f"Fallback continuous QP failed with exception: {fallback_e}")
-                return pd.Series(dtype='float64') # Return empty series on complete failure
+            except Exception as e:
+                logger.error(f"An exception occurred during continuous QP optimization: {e}", exc_info=True)
+
+            # --- Fallback: Equal Weight on Top N by Market Cap from the candidate universe ---
+            logger.warning("Optimization failed. Falling back to equal weight on top market cap assets from candidate universe.")
+            top_assets = market_caps.loc[candidate_tickers].nlargest(self.max_positions).index
+            return pd.Series(1/len(top_assets), index=top_assets)
 
         except Exception as e:
             logger.error(f"Optimization failed: {str(e)}", exc_info=True)
-            return None
-
-    def _fallback_optimization(self, mu: np.ndarray, 
-                             cov_matrix: np.ndarray, 
-                             tickers: pd.Index) -> Optional[pd.Series]:
-        """
-        Fallback optimization using continuous relaxation.
-        
-        Args:
-            mu: Expected returns
-            cov_matrix: Covariance matrix
-            tickers: Asset tickers
-            
-        Returns:
-            Optimized weights or None if optimization fails
-        """
-        logger.warning("All mixed-integer solvers failed. Attempting continuous relaxation.")
-        
-        try:
-            n_assets = len(tickers)
-            weights = cp.Variable(n_assets, nonneg=True)
-            
-            objective = cp.Maximize(
-                mu @ weights - 
-                self.risk_aversion * cp.quad_form(weights, cp.psd_wrap(cov_matrix)) -
-                self.l2_penalty * cp.sum_squares(weights)
-            )
-            
-            constraints = [
-                cp.sum(weights) == 1,
-                weights <= self.max_weight
-            ]
-            
-            problem = cp.Problem(objective, constraints)
-            problem.solve(solver=cp.SCS, verbose=False)
-            
-            if problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-                full_weights = pd.Series(weights.value, index=tickers)
-                top_n_weights = full_weights.nlargest(self.max_positions)
-                if not top_n_weights.empty:
-                    return top_n_weights / top_n_weights.sum()
-                    
-        except Exception as e:
-            logger.error(f"Continuous fallback optimization failed: {str(e)}", exc_info=True)
-        
-        # Final fallback: equal weight
-        logger.error("All optimization attempts failed. Falling back to equal weight.")
-        top_assets = pd.Series(mu, index=tickers).nlargest(self.max_positions).index
-        return pd.Series(1/len(top_assets), index=top_assets)
+            return pd.Series(dtype=float)
