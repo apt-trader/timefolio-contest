@@ -4,6 +4,8 @@ import optuna
 import argparse
 import sys
 import time
+from copy import deepcopy
+import pandas as pd
 import traceback
 import json
 from pathlib import Path
@@ -14,6 +16,7 @@ from typing import Any, Dict
 sys.path.insert(0, str(Path(__file__).parent))
 
 from backtester import Backtester
+from data_manager import DataManager
 from config import Config
 
 # Configure logging with detailed format and progress tracking
@@ -35,7 +38,7 @@ logger = logging.getLogger("HyperparameterTuner")
 # Constants
 BASE_CONFIG_PATH = 'config/config.yaml'
 DEFAULT_N_TRIALS = 50
-DEFAULT_STUDY_NAME = 'timefolio-hyperopt'
+DEFAULT_STUDY_NAME = 'final-model-tuning-v1'
 DEFAULT_DB_URL = 'sqlite:///tuning_results.db'
 
 # Parameter search spaces
@@ -153,7 +156,7 @@ def update_config(cfg: Config, params: Dict[str, Any]) -> None:
     if 'momentum_window' in params:
         cfg.factor_settings['mom_windows'] = [params['momentum_window']]
 
-def objective(trial: optuna.Trial) -> float:
+def objective(trial: optuna.Trial, start_date: str, end_date: str) -> float:
     """Optimization objective for Optuna hyperparameter tuning with enhanced logging and error handling."""
     trial_start_time = time.time()
     trial_id = f"{trial.number:04d}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -211,13 +214,29 @@ def objective(trial: optuna.Trial) -> float:
             trial_logger.error(error_msg, exc_info=True)
             raise TuningError(error_msg)
         
-        # 3. Initialize and run backtester
+        # 3. Initialize DataManager and Backtester
         try:
-            trial_logger.info("Initializing backtester...")
+            trial_logger.info("Initializing DataManager for backtest...")
+            
+            # Create a dedicated config for the DataManager to avoid side effects
+            dm_config = deepcopy(cfg)
+            dm_config.data_settings['start_date'] = (pd.to_datetime(start_date) - pd.DateOffset(years=2)).strftime('%Y-%m-%d')
+            dm_config.data_settings['end_date'] = end_date
+            
+            dm = DataManager(dm_config, backtest_mode=True)
+            if not dm.load_data():
+                raise TuningError("DataManager failed to load data.")
+            
+            trial_logger.info(f"DataManager loaded. Sector map contains {len(dm.sector_map)} entries.")
+            if not dm.sector_map:
+                trial_logger.warning("Sector map is empty after loading. Check data sources.")
+
+            trial_logger.info("Initializing backtester with pre-loaded data...")
             backtester = Backtester(
                 cfg=cfg,
-                start_date='2023-01-01',  # Fixed period for fair comparison
-                end_date='2024-06-01'
+                start_date=start_date,
+                end_date=end_date,
+                dm=dm  # Inject the pre-loaded DataManager
             )
             
             # Run backtest and collect metrics
@@ -448,13 +467,17 @@ def main():
         study = create_or_load_study(args.study_name, args.db_url)
         
         # Run optimization
+        # Create a wrapper for the objective function to pass static arguments
+        objective_with_args = lambda trial: objective(
+            trial, 
+            start_date="2023-01-01", 
+            end_date="2024-12-31"
+        )
+
         study.optimize(
-            objective,
+            objective_with_args,
             n_trials=args.n_trials,
             n_jobs=args.n_jobs,
-            timeout=args.timeout,
-            gc_after_trial=True,
-            show_progress_bar=True
         )
         
         # Print results
