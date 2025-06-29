@@ -7,16 +7,18 @@ data_settings:
   db_path: "db/krx_data.db"
   
   # Global date range for backtesting and analysis.
-  # It is recommended to use at least 3-4 years of data.
-  start_date: '2020-01-01'
-  end_date: '2025-06-27' 
+  # Focus on 2023-2024 period - excludes COVID anomalous period (2020-2022)
+  # End date set to Friday for weekend data fetching and Monday submissions
+  start_date: '2023-01-01'
+  end_date: '2024-12-27'  # Friday - aligned with weekend data fetching schedule 
 
 # --- Model Training Settings ---
 training_settings:
-  # This is the period used for finding optimal parameters (tuning) and training the model during RESEARCH.
-  # It should reflect the most relevant market regime.
+  # Focus on 2023-2024: Higher interest rates, inflation concerns, selective market
+  # Excludes COVID era (2020-2022) to avoid learning wrong lessons from anomalous period
+  # This period represents current market reality most relevant for contest
   start_date: '2023-01-01'
-  end_date: '2024-12-31'
+  end_date: '2024-12-27'  # Friday - aligned with weekend data fetching schedule
   rebalance_frequency: 'M'      # Frequency for recalculating factors during training (M=Month-end)
   forward_return_period: 21     # Horizon for forward returns used as prediction target (in trading days)
 
@@ -24,7 +26,7 @@ training_settings:
 optimization_settings:
   # --- Heuristic & Constraints ---
   # In the first step of the heuristic, we select the top N assets by expected return.
-  max_positions: 15           # Controls the size of the candidate universe passed to the QP solver.
+  max_positions: 12           # Controls the size of the candidate universe passed to the QP solver.
   individual_limit: 0.15      # Max weight for any single stock (enforced in solver).
   sector_limits_path: "market_sectors.csv"  # Path to the file with dynamic sector deviation limits.
 

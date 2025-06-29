@@ -331,10 +331,10 @@ def parse_arguments():
     # Required arguments
     parser.add_argument('--start-date', 
                       default='2023-01-01',
-                      help='Start date for backtesting (YYYY-MM-DD).')
+                      help='Start date for backtesting - focuses on 2023-2024 period (YYYY-MM-DD).')
     parser.add_argument('--end-date',
-                      default='2024-06-01',
-                      help='End date for backtesting (YYYY-MM-DD).')
+                      default='2024-12-27',
+                      help='End date for backtesting - Friday aligned with weekend data fetching (YYYY-MM-DD).')
     
     # Tuning parameters
     parser.add_argument('-n', '--n-trials', 
@@ -470,8 +470,8 @@ def main():
         # Create a wrapper for the objective function to pass static arguments
         objective_with_args = lambda trial: objective(
             trial, 
-            start_date="2023-01-01", 
-            end_date="2024-12-31"
+            start_date=args.start_date, 
+            end_date=args.end_date
         )
 
         study.optimize(
