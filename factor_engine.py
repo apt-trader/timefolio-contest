@@ -45,30 +45,38 @@ class FactorEngine:
             return series - series.mean()
         return (series - series.mean()) / std
 
-    def _calculate_value_factors(self, fundamentals: pd.DataFrame, market_caps: pd.Series) -> Tuple[pd.Series, ...]:
-        """Calculates B/P, E/P, S/P, and CF/P."""
-        mcaps = market_caps.replace(0, np.nan)
-        book_value = _safe_get(fundamentals, 'total_equity', market_caps.index)
-        earnings = _safe_get(fundamentals, 'net_income', market_caps.index)
-        sales = _safe_get(fundamentals, 'revenue', market_caps.index)
-        cash_flow = _safe_get(fundamentals, 'operating_cash_flow', market_caps.index)
+    def _calculate_value_factors(self, fundamentals: pd.DataFrame, market_caps: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+        """Calculates value factors: B/P, E/P, S/P, C/P."""
+        if fundamentals.columns.empty:
+            logger.warning("Value factors: Fundamentals data is missing key columns. Returning NaNs.")
+            nan_series = pd.Series(np.nan, index=market_caps.index)
+            return nan_series, nan_series, nan_series, nan_series
+
+        # Align fundamentals with market cap tickers. market_caps is already the latest series.
+        funda_aligned, cap_aligned = fundamentals.align(market_caps, axis=0, join='right')
+
+        # Use np.nan as default to ensure we return a 1D Series.
+        # This prevents the .get() from returning a DataFrame if the key is not found.
+        b2p = funda_aligned.get('total_equity', np.nan) / cap_aligned
+        e2p = funda_aligned.get('net_income', np.nan) / cap_aligned
+        s2p = funda_aligned.get('revenue', np.nan) / cap_aligned
+        c2p = funda_aligned.get('operating_cash_flow', np.nan) / cap_aligned
         
-        b2p = book_value / mcaps
-        e2p = earnings / mcaps
-        s2p = sales / mcaps
-        c2p = cash_flow / mcaps
         return b2p, e2p, s2p, c2p
 
-    def _calculate_quality_factors(self, fundamentals: pd.DataFrame, historical_fundamentals: Dict[str, pd.DataFrame]) -> Tuple[pd.Series, ...]:
-        """Calculates ROE, Financial Leverage, and ROE Stability."""
+    def _calculate_quality_factors(self, fundamentals: pd.DataFrame, historical_fundamentals: Dict[str, pd.DataFrame], date: pd.Timestamp) -> Tuple[pd.Series, ...]:
+        """Calculates ROE, Financial Leverage, and ROE Stability on a point-in-time basis."""
         roe = _safe_get(fundamentals, 'roe', fundamentals.index)
         leverage = _safe_get(fundamentals, 'debt_to_equity', fundamentals.index)
         
         roe_stability_values = {}
         for ticker, df in historical_fundamentals.items():
-            if 'roe' in df.columns and len(df['roe'].dropna()) >= 2:
-                roe_stability_values[ticker] = df['roe'].std()
-        roe_stability = pd.Series(roe_stability_values, name='roe_stability')
+            # Filter for point-in-time data
+            pit_df = df[df.index.date <= date.date()]
+            if 'roe' in pit_df.columns and len(pit_df['roe'].dropna()) >= 4:  # Use at least 4 quarters for stable std dev
+                roe_stability_values[ticker] = pit_df['roe'].std()
+        # Reindex to ensure the series aligns with the full universe for the given date.
+        roe_stability = pd.Series(roe_stability_values, name='roe_stability').reindex(fundamentals.index)
 
         # Higher leverage and instability are bad, so we negate them.
         return roe, -leverage, -roe_stability
@@ -88,60 +96,118 @@ class FactorEngine:
         return gpa, opm, npm
 
     def _calculate_momentum_factors(self, prices: pd.DataFrame) -> Tuple[pd.Series, ...]:
-        """Calculates 12M momentum, 6M acceleration, and volatility-scaled momentum."""
-        if prices.shape[0] < 252:
-            return pd.Series(dtype=float), pd.Series(dtype=float), pd.Series(dtype=float)
+        """
+        Calculates standard 12-1M momentum, 6M acceleration, and volatility-scaled momentum.
+        Momentum is calculated as the return from 12 months ago to 1 month ago to avoid
+        the short-term reversal effect, which is a well-documented market anomaly.
+        """
+        # Define lookback periods in trading days
+        month_period = 21
+        six_month_period = 126
+        year_period = 252
         
-        returns = prices.pct_change()
-        # 12-month momentum, skipping most recent month
-        mom12m = prices.pct_change(252 - 21).iloc[-1]
+        # Ensure there's enough data for the longest lookback
+        if len(prices) < year_period + month_period:
+            nan_series = pd.Series(np.nan, index=prices.columns)
+            logger.warning(f"Not enough price data ({len(prices)} days) to calculate momentum, need {year_period + month_period}. Returning NaNs.")
+            return nan_series, nan_series, nan_series
+
+        # --- 12-1 Month Momentum ---
+        # Price from 1 month ago (t-1M)
+        price_t_minus_1 = prices.iloc[-month_period]
+        # Price from 12 months ago (t-12M)
+        price_t_minus_12 = prices.iloc[-year_period]
         
-        # 6-month acceleration
-        mom6m_late = prices.pct_change(126 - 21).iloc[-1]
-        mom6m_early = prices.pct_change(126 - 21).iloc[-126]
-        acceleration = mom6m_late - mom6m_early
+        # Calculate momentum, handling potential zero prices
+        mom12m = (price_t_minus_1 / price_t_minus_12.replace(0, np.nan)) - 1
+
+        # --- Volatility-Scaled Momentum ---
+        # Volatility is calculated over the past year's log returns
+        log_returns = np.log(prices.replace(0, np.nan)).diff()
+        vol_returns = log_returns.iloc[-year_period:] # Use the last year of returns for vol calc
+        annualized_vol = vol_returns.std() * np.sqrt(252)
+        vol_scaled_mom = mom12m / annualized_vol.replace(0, np.nan)
+
+        # --- 6-Month Acceleration (also lagged) ---
+        # Price from 7 months ago (t-7M)
+        price_t_minus_7 = prices.iloc[- (6 * month_period + month_period)]
         
-        # Volatility-scaled momentum
-        vol_scaled_mom = mom12m / returns.rolling(252).std().iloc[-1].replace(0, np.nan)
+        # Recent 6-month momentum (from t-7M to t-1M)
+        late_6m_ret = (price_t_minus_1 / price_t_minus_7.replace(0, np.nan)) - 1
         
+        # Check if there's enough data for prior momentum
+        if len(prices) > year_period + six_month_period:
+            # Price from 13 months ago (t-13M)
+            price_t_minus_13 = prices.iloc[- (12 * month_period + month_period)]
+            # Prior 6-month momentum (from t-13M to t-7M)
+            early_6m_ret = (price_t_minus_7 / price_t_minus_13.replace(0, np.nan)) - 1
+            acceleration = late_6m_ret - early_6m_ret
+        else:
+            acceleration = pd.Series(np.nan, index=prices.columns)
+            
         return mom12m, acceleration, vol_scaled_mom
 
-    def _calculate_investment_factors(self, historical_fundamentals: Dict[str, pd.DataFrame]) -> Tuple[pd.Series, ...]:
-        """Calculates Asset Growth and CAPEX growth."""
-        tickers = list(historical_fundamentals.keys())
-        if not tickers:
-            return pd.Series(dtype=float), pd.Series(dtype=float)
+    def _calculate_investment_factors(self, historical_fundamentals: Dict[str, pd.DataFrame], date: pd.Timestamp, index: pd.Index) -> Tuple[pd.Series, ...]:
+        """Calculates point-in-time Asset Growth and CAPEX growth."""
+        if not historical_fundamentals:
+            nan_series = pd.Series(np.nan, index=index)
+            return nan_series, nan_series
 
         asset_growth_vals = {}
         capex_growth_vals = {}
         
         for ticker, df in historical_fundamentals.items():
+            # Filter for point-in-time data
+            pit_df = df[df.index.date <= date.date()]
+            
             # Asset Growth
-            if 'total_assets' in df.columns and len(df) > 1 and df['total_assets'].iloc[-2] != 0:
-                asset_growth_vals[ticker] = (df['total_assets'].iloc[-1] / df['total_assets'].iloc[-2]) - 1
+            if 'total_assets' in pit_df.columns:
+                assets = pit_df['total_assets'].dropna()
+                if len(assets) > 1 and assets.iloc[-2] != 0:
+                    asset_growth_vals[ticker] = (assets.iloc[-1] / assets.iloc[-2]) - 1
             # CAPEX Growth
-            if 'capex' in df.columns and len(df) > 1 and df['capex'].iloc[-2] != 0:
-                 capex_growth_vals[ticker] = (df['capex'].iloc[-1] / df['capex'].iloc[-2]) - 1
+            if 'capex' in pit_df.columns:
+                capex = pit_df['capex'].dropna()
+                if len(capex) > 1 and capex.iloc[-2] != 0:
+                     capex_growth_vals[ticker] = (capex.iloc[-1] / capex.iloc[-2]) - 1
 
-        asset_growth = pd.Series(asset_growth_vals)
-        capex_growth = pd.Series(capex_growth_vals)
+        asset_growth = pd.Series(asset_growth_vals).reindex(index)
+        capex_growth = pd.Series(capex_growth_vals).reindex(index)
 
         # Lower asset growth is considered better
         return -asset_growth, capex_growth
 
-    def calculate_factors_for_date(self, prices: pd.DataFrame, volumes: pd.DataFrame, market_caps: pd.DataFrame, fundamentals: pd.DataFrame,
+    def calculate_factors_for_date(self, date: pd.Timestamp, prices: pd.DataFrame, volumes: pd.DataFrame, market_caps: pd.Series, fundamentals: pd.DataFrame,
                              historical_fundamentals: Dict[str, pd.DataFrame], market_prices: pd.Series = None) -> pd.DataFrame:
         """Calculates all factors for a given date and returns a DataFrame."""
-        self.latest_market_caps = market_caps.iloc[-1] if not market_caps.empty else pd.Series(dtype=float)
+        logger.debug(f"[{date.date()}] Calculating factors for {len(prices.columns)} tickers.")
+        self.latest_market_caps = market_caps
         
         # Align fundamentals to the same index as prices
         fundamentals = fundamentals.reindex(prices.columns)
 
         b2p, e2p, s2p, c2p = self._calculate_value_factors(fundamentals, self.latest_market_caps)
-        roe, lev, roe_stab = self._calculate_quality_factors(fundamentals, historical_fundamentals)
+        roe, lev, roe_stab = self._calculate_quality_factors(fundamentals, historical_fundamentals, date)
         gpa, opm, npm = self._calculate_profitability_factors(fundamentals)
         mom, acc, vol_mom = self._calculate_momentum_factors(prices)
-        inv, capex_g = self._calculate_investment_factors(historical_fundamentals)
+        inv, capex_g = self._calculate_investment_factors(historical_fundamentals, date, prices.columns)
+
+        logger.info(f"Debug factor shapes: "
+                    f"B2P: {getattr(b2p, 'shape', 'N/A')}, "
+                    f"E2P: {getattr(e2p, 'shape', 'N/A')}, "
+                    f"S2P: {getattr(s2p, 'shape', 'N/A')}, "
+                    f"C2P: {getattr(c2p, 'shape', 'N/A')}, "
+                    f"ROE: {getattr(roe, 'shape', 'N/A')}, "
+                    f"Leverage: {getattr(lev, 'shape', 'N/A')}, "
+                    f"ROE_Stability: {getattr(roe_stab, 'shape', 'N/A')}, "
+                    f"GPA: {getattr(gpa, 'shape', 'N/A')}, "
+                    f"OPM: {getattr(opm, 'shape', 'N/A')}, "
+                    f"NPM: {getattr(npm, 'shape', 'N/A')}, "
+                    f"Momentum: {getattr(mom, 'shape', 'N/A')}, "
+                    f"Acceleration: {getattr(acc, 'shape', 'N/A')}, "
+                    f"Vol_Momentum: {getattr(vol_mom, 'shape', 'N/A')}, "
+                    f"Investment: {getattr(inv, 'shape', 'N/A')}, "
+                    f"CAPEX_Growth: {getattr(capex_g, 'shape', 'N/A')}")
 
         all_factors = pd.DataFrame({
             'B2P': b2p, 'E2P': e2p, 'S2P': s2p, 'C2P': c2p,
@@ -153,10 +219,42 @@ class FactorEngine:
 
         # Align all factors to the master price index, then clean and standardize
         all_factors = all_factors.reindex(prices.columns)
-        all_factors = all_factors.apply(self._winsorize, axis=0).apply(self._standardize, axis=0)
+        all_factors.dropna(how='all', inplace=True) # Drop tickers where all factors are NaN
+
+        # --- Diagnostic Logging ---
+        logger.debug(f"[{date.date()}] Raw factor non-null counts:\n" + str(all_factors.notna().sum()))
+
+        if all_factors.empty:
+            logger.warning(f"[{date.date()}] Factor DataFrame is empty because no factors could be calculated for any ticker.")
+            return all_factors
+
+        # Drop columns that are entirely NaN
+        initial_cols = set(all_factors.columns)
+        all_factors.dropna(axis=1, how='all', inplace=True)
+        final_cols = set(all_factors.columns)
+        dropped_cols = initial_cols - final_cols
+        if dropped_cols:
+            logger.warning(f"[{date.date()}] Dropped fully null factor columns: {sorted(list(dropped_cols))}")
+
+        # Impute missing values with the cross-sectional median for that day.
+        # This is more robust than filling with 0, especially before standardization.
+        imputed_factors = all_factors.apply(lambda x: x.fillna(x.median()), axis=0)
+
+        # After imputation, some columns might still be all NaN if all values were NaN to begin with.
+        imputed_factors.dropna(axis=1, how='all', inplace=True)
+        imputed_factors.dropna(axis=0, how='all', inplace=True)
         
-        final_factors = all_factors.fillna(0)
-        logger.info(f"Successfully calculated {final_factors.shape[1]} factors for {final_factors.shape[0]} tickers.")
+        if imputed_factors.empty:
+            logger.warning(f"[{date.date()}] Factor DataFrame is empty after imputation. All factors were NaN.")
+            return imputed_factors
+
+        # Now, winsorize and standardize.
+        processed_factors = imputed_factors.apply(self._winsorize, axis=0).apply(self._standardize, axis=0)
+        
+        # As a final fallback, fill any remaining NaNs with 0. This can happen if a column had only one non-NaN value.
+        final_factors = processed_factors.fillna(0)
+        
+        logger.info(f"Successfully calculated {final_factors.shape[1]} factors for {final_factors.shape[0]} tickers on {date.date()}.")
         return final_factors
 
     def train(self, factor_panel: pd.DataFrame, forward_returns: pd.Series):
@@ -235,11 +333,11 @@ class FactorEngine:
         final_neutralized_scores = neutralized_scores.reindex(scores_series.index).fillna(0)
 
         # --- Cross-Sectional Z-Scoring ---
-        final_scores = self._normalize_scores(final_neutralized_scores)
+        final_scores = self._normalize_alpha_scores(final_neutralized_scores)
         
         return final_scores
 
-    def _normalize_scores(self, scores_series: pd.Series) -> pd.Series:
+    def _normalize_alpha_scores(self, scores_series: pd.Series) -> pd.Series:
         """
         Helper to normalize raw alpha scores into a z-score.
         """
