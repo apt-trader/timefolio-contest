@@ -28,6 +28,7 @@ class PortfolioOptimizer:
         self.max_weight = opt_cfg.get('max_weight', 0.05)
         self.risk_aversion = opt_cfg.get('risk_aversion', 1.0)
         self.l2_penalty = opt_cfg.get('l2_penalty', 0.0)
+        self.cov_l2_alpha = opt_cfg.get('cov_l2_alpha', 0.05)
         self.skip_rules = opt_cfg.get('skip_rules', False)
         self.verbose = opt_cfg.get('verbose', False)
         
