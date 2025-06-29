@@ -27,7 +27,13 @@ class DataManager:
         self.backtest_mode = backtest_mode
         self._apply_db_optimizations()
         self._krx = KRXDataFetcher(db_path=self.db_path)
-        self._fin = FinancialsFetcher(api_key=os.getenv('DART_API_KEY'), db_path=self.db_path)
+        # In backtest mode, the fetcher should only read from the DB and not make live API calls.
+        # We pass `db_only_mode=self.backtest_mode` to enforce this.
+        self._fin = FinancialsFetcher(
+            api_key=os.getenv('DART_API_KEY'), 
+            db_path=self.db_path,
+            db_only_mode=self.backtest_mode
+        )
         self._macro = MacroFetcher(fred_api_key=os.getenv('FRED_API_KEY'))
         self.tickers: List[str] = []; self.sector_map: Dict[str, str] = {}
         # Dataframes to be populated by load_data()
@@ -238,16 +244,57 @@ class DataManager:
         logger.info("Data alignment complete.")
 
     def _calculate_and_fill_returns(self):
-        """Calculates daily returns and handles infinite values."""
+        """Calculates daily returns and handles infinite values and zero prices."""
         logger.info("Calculating daily returns...")
         if self.prices.empty:
             logger.error("Cannot calculate returns, prices dataframe is empty.")
             self.returns = pd.DataFrame()
             return
 
-        self.returns = self.prices.pct_change().fillna(0)
-        self.returns.replace([np.inf, -np.inf], np.nan, inplace=True)
+        # First, handle zero prices by replacing them with NaN to avoid infinite returns
+        cleaned_prices = self.prices.copy()
+        zero_count = (cleaned_prices == 0).sum().sum()
+        if zero_count > 0:
+            logger.warning(f"Found {zero_count} zero prices - replacing with NaN to prevent infinite returns")
+            cleaned_prices = cleaned_prices.replace(0, np.nan)
+            
+            # Forward fill to handle missing prices, but limit to prevent stale prices
+            cleaned_prices = cleaned_prices.fillna(method='ffill', limit=5)
+            
+            # If still NaN after forward fill, backward fill with limit
+            cleaned_prices = cleaned_prices.fillna(method='bfill', limit=5)
+        
+        # Calculate returns
+        self.returns = cleaned_prices.pct_change().fillna(0)
+        
+        # Handle extreme returns that indicate data quality issues
+        extreme_positive = (self.returns > 3.0).sum().sum()  # >300% daily return
+        extreme_negative = (self.returns < -0.95).sum().sum()  # <-95% daily return
+        
+        if extreme_positive > 0:
+            logger.warning(f"Found {extreme_positive} extreme positive returns (>300%) - capping at 50%")
+            self.returns = self.returns.clip(upper=0.5)
+            
+        if extreme_negative > 0:
+            logger.warning(f"Found {extreme_negative} extreme negative returns (<-95%) - capping at -50%")
+            self.returns = self.returns.clip(lower=-0.5)
+        
+        # Clean infinite and NaN values
+        inf_count = np.isinf(self.returns).sum().sum()
+        if inf_count > 0:
+            logger.warning(f"Found {inf_count} infinite returns - replacing with 0")
+            self.returns.replace([np.inf, -np.inf], 0, inplace=True)
+        
         self.returns.fillna(0, inplace=True)
+        
+        # Log final statistics
+        valid_returns = self.returns[self.returns != 0]
+        if not valid_returns.empty:
+            logger.info(f"Returns calculated: Mean={valid_returns.stack().mean():.6f}, "
+                       f"Std={valid_returns.stack().std():.6f}, "
+                       f"Min={valid_returns.stack().min():.6f}, "
+                       f"Max={valid_returns.stack().max():.6f}")
+        
         logger.info("Daily returns calculated and cleaned.")
 
     def _log_data_quality(self):
