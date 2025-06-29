@@ -26,9 +26,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class FinancialsFetcher:
-    def __init__(self, api_key: str, db_path: str):
-        self.dart = OpenDartReader(api_key) if api_key else None
-        if not api_key: logger.warning("DART API key not provided. FinancialsFetcher will not be able to fetch new data.")
+    def __init__(self, api_key: Optional[str], db_path: str, db_only_mode: bool = False):
+        self.db_only_mode = db_only_mode
+        self.dart = None
+        if not self.db_only_mode:
+            if api_key:
+                try:
+                    self.dart = OpenDartReader(api_key)
+                except ValueError as e:
+                    logger.error(f"Failed to initialize OpenDartReader: {e}")
+                    # This can happen if the API key is invalid or quota is exceeded on init
+                    self.dart = None
+            else:
+                logger.warning("DART API key not provided. Fetcher will not be able to make live API calls.")
+
         self.db_path = db_path
         self.corp_code_cache = CorpCodeCache()
         self._init_db_structure()
@@ -148,20 +159,301 @@ class FinancialsFetcher:
         try:
             with self._create_connection() as conn:
                 df = pd.read_sql_query(query, conn, params=tickers)
+
+
             if df.empty:
                 logger.warning("No financial data found in DB for the requested corp_codes.")
                 return pd.DataFrame()
-            # Use the standardized 'report_date' column for pivoting
-            pivot_df = df.pivot_table(index=['corp_code', 'ticker', 'report_date', 'report_code'], columns='account_nm', values='thstrm_amount', aggfunc='first').reset_index()
-            pivot_df.columns.name = None
-            value_cols = [col for col in pivot_df.columns if col not in ['corp_code', 'ticker', 'report_date', 'report_code']]
-            for col in value_cols:
-                pivot_df[col] = pd.to_numeric(pivot_df[col].astype(str).str.replace(',', ''), errors='coerce')
+
+            # --- Data Cleaning and Type Conversion ---
+            # 1. Strip whitespace from ticker column to ensure consistency.
+            df['ticker'] = df['ticker'].astype(str).str.strip()
+            
+            # 2. Robustly convert 'report_date' from Unix timestamp (stored as text) to datetime.
+            df['report_date'] = pd.to_datetime(pd.to_numeric(df['report_date'], errors='coerce'), unit='s')
+            
+            # 3. Handle None values in report_code (replace with a default value)
+            df['report_code'] = df['report_code'].fillna('11013')  # Default to consolidated statement code
+            
+            # 4. Drop any rows where the date conversion or other critical data for pivot is missing.
+            df.dropna(subset=['report_date', 'ticker', 'account_nm', 'thstrm_amount'], inplace=True)
+
+            # --- Final Data Preparation for Pivot ---
+            logger.info(f"[DEBUG] Pre-conversion DataFrame shape: {df.shape}")
+            logger.info(f"[DEBUG] Sample thstrm_amount values: {df['thstrm_amount'].head(10).tolist()}")
+            
+            # 1. Convert the value column to a numeric type BEFORE pivoting. This is the critical fix.
+            df['thstrm_amount'] = pd.to_numeric(df['thstrm_amount'].astype(str).str.replace(',', ''), errors='coerce')
+            logger.info(f"[DEBUG] After numeric conversion, non-null count: {df['thstrm_amount'].notna().sum()}")
+            logger.info(f"[DEBUG] After numeric conversion, null count: {df['thstrm_amount'].isna().sum()}")
+            
+            df.dropna(subset=['thstrm_amount'], inplace=True) # Drop rows where conversion failed
+            logger.info(f"[DEBUG] After dropna, DataFrame shape: {df.shape}")
+            
+            if df.empty:
+                logger.error("[DEBUG] DataFrame is empty after numeric conversion - all values failed to convert!")
+                return pd.DataFrame()
+            
+            # 2. Check for and handle duplicates before pivot
+            logger.info(f"[DEBUG] Unique account_nm values: {df['account_nm'].nunique()}")
+            logger.info(f"[DEBUG] Sample account_nm values: {df['account_nm'].unique()[:10].tolist()}")
+            
+            # Check for duplicates that would cause pivot to fail
+            duplicates = df.duplicated(subset=['corp_code', 'ticker', 'report_date', 'report_code', 'account_nm'], keep=False)
+            if duplicates.any():
+                logger.warning(f"[DEBUG] Found {duplicates.sum()} duplicate rows, removing duplicates...")
+                df = df.drop_duplicates(subset=['corp_code', 'ticker', 'report_date', 'report_code', 'account_nm'], keep='first')
+                logger.info(f"[DEBUG] After removing duplicates, shape: {df.shape}")
+            
+            # 3. Analyze data before pivot
+            logger.info(f"[DEBUG] Unique combinations of index cols: {df[['corp_code', 'ticker', 'report_date', 'report_code']].drop_duplicates().shape[0]}")
+            logger.info(f"[DEBUG] Sample data before pivot:")
+            logger.info(f"[DEBUG] {df[['corp_code', 'ticker', 'report_date', 'report_code', 'account_nm', 'thstrm_amount']].head(10)}")
+            
+            # 4. Perform the pivot operation.
+            try:
+                pivot_df = df.pivot_table(index=['corp_code', 'ticker', 'report_date', 'report_code'], columns='account_nm', values='thstrm_amount', aggfunc='first').reset_index()
+                pivot_df.columns.name = None
+                logger.info(f"[DEBUG] Post-pivot DataFrame shape: {pivot_df.shape}")
+                
+                if len(pivot_df) == 0:
+                    logger.error("[DEBUG] Pivot returned empty DataFrame despite valid input data!")
+                    logger.info(f"[DEBUG] Trying alternative pivot without reset_index...")
+                    alt_pivot = df.pivot_table(index=['corp_code', 'ticker', 'report_date', 'report_code'], columns='account_nm', values='thstrm_amount', aggfunc='first')
+                    logger.info(f"[DEBUG] Alternative pivot shape: {alt_pivot.shape}")
+                    logger.info(f"[DEBUG] Alternative pivot index: {alt_pivot.index[:5] if len(alt_pivot) > 0 else 'Empty'}")
+                    
+            except Exception as pivot_error:
+                logger.error(f"[DEBUG] Pivot operation failed: {pivot_error}")
+                logger.info(f"[DEBUG] Sample of data that failed to pivot: {df.head()}")
+                return pd.DataFrame()
+            
+            # 5. Map Korean account names to English column names for factor engine compatibility
+            logger.info(f"[DEBUG] Before mapping, sample columns: {list(pivot_df.columns)[:10]}")
+            pivot_df = self._map_korean_to_english_columns(pivot_df)
+            logger.info(f"[DEBUG] After column mapping, DataFrame shape: {pivot_df.shape}")
+            if not pivot_df.empty:
+                english_cols = [col for col in pivot_df.columns if col not in ['corp_code', 'ticker', 'report_date', 'report_code']]
+                logger.info(f"[DEBUG] Available English columns: {english_cols[:10]}...")
+                logger.info(f"[DEBUG] Total English columns found: {len(english_cols)}")
+                # Check for key columns needed by factor engine
+                key_cols = ['total_assets', 'total_equity', 'revenue', 'net_income', 'operating_cash_flow']
+                found_key_cols = [col for col in key_cols if col in pivot_df.columns]
+                logger.info(f"[DEBUG] Key factor engine columns found: {found_key_cols}")
+            else:
+                logger.error(f"[DEBUG] pivot_df is empty after column mapping!")
             logger.info(f"Successfully retrieved and processed {len(pivot_df)} historical financial reports.")
             return pivot_df
         except Exception as e:
             logger.error(f"Error fetching historical financials from DB: {e}", exc_info=True)
             return pd.DataFrame()
+
+    def _map_korean_to_english_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Maps Korean financial statement account names to English column names expected by the factor engine."""
+        # Mapping dictionary for Korean account names to English equivalents
+        korean_to_english = {
+            # Balance Sheet Items
+            '자산총계': 'total_assets',
+            '유동자산': 'current_assets', 
+            '비유동자산': 'non_current_assets',
+            '자본총계': 'total_equity',
+            '부채총계': 'total_liabilities',
+            '유동부채': 'current_liabilities',
+            '비유동부채': 'non_current_liabilities',
+            '자본금': 'capital_stock',
+            '이익잉여금': 'retained_earnings',
+            '유형자산': 'tangible_assets',
+            '무형자산': 'intangible_assets',
+            '현금및현금성자산': 'cash_and_equivalents',
+            
+            # Income Statement Items
+            '매출액': 'revenue',
+            '당기순이익': 'net_income',
+            '영업이익': 'operating_income',
+            '매출총이익': 'gross_profit',
+            '영업활동현금흐름': 'operating_cash_flow',
+            '법인세차감전순이익': 'pre_tax_income',
+            '법인세비용차감전순이익': 'pre_tax_income',
+            
+            # Cash Flow Statement Items
+            '영업활동으로 인한 현금흐름': 'operating_cash_flow',
+            '투자활동으로 인한 현금흐름': 'investing_cash_flow',
+            '투자활동현금흐름': 'investing_cash_flow',
+            '2. 투자활동으로 인한 현금유출액': 'capex',
+            '재무활동현금흐름': 'financing_cash_flow',
+            '재무활동으로 인한 현금흐름': 'financing_cash_flow',
+            
+            # Alternative names that might appear
+            '수익': 'revenue',
+            '총자산': 'total_assets',
+            '순이익': 'net_income',
+            '총매출': 'revenue',
+            '당기순이익(손실)': 'net_income',
+            '영업에서 창출된 현금흐름': 'operating_cash_flow',
+            '영업으로부터 창출된 현금흐름': 'operating_cash_flow'
+        }
+        
+        # Rename columns using the mapping
+        df_mapped = df.rename(columns=korean_to_english)
+        
+        # Handle duplicate columns by consolidating them
+        # Find columns that appear multiple times
+        duplicate_cols = df_mapped.columns[df_mapped.columns.duplicated()].unique()
+        
+        if len(duplicate_cols) > 0:
+            logger.info(f"[DEBUG] Found duplicate columns after mapping: {list(duplicate_cols)}")
+            
+            # For each duplicate column, consolidate by taking the first non-null value
+            for col in duplicate_cols:
+                # Get all columns with this name
+                dup_data = df_mapped[col]
+                if isinstance(dup_data, pd.DataFrame):
+                    # Combine columns by taking first non-null value across columns
+                    consolidated = dup_data.fillna(method='ffill', axis=1).iloc[:, -1]
+                    # Drop all duplicate columns
+                    df_mapped = df_mapped.drop(columns=[col])
+                    # Add back the consolidated column
+                    df_mapped[col] = consolidated
+        
+        # Log the mapping results
+        mapped_cols = [col for col in korean_to_english.values() if col in df_mapped.columns]
+        if mapped_cols:
+            logger.info(f"[DEBUG] Successfully mapped columns: {mapped_cols}")
+        else:
+            logger.warning(f"[DEBUG] No Korean columns were mapped to English. Available columns: {list(df.columns)}")
+        
+        # Calculate derived financial ratios needed by factor engine
+        self._calculate_financial_ratios(df_mapped)
+        
+        return df_mapped
+    
+    def _calculate_financial_ratios(self, df: pd.DataFrame) -> None:
+        """Calculate financial ratios like ROE and debt-to-equity that are needed by factor engine."""
+        try:
+            # Ensure we have a clean index to avoid alignment issues
+            df.reset_index(drop=True, inplace=True)
+            
+            # Calculate ROE = Net Income / Total Equity
+            if 'net_income' in df.columns and 'total_equity' in df.columns:
+                # Ensure columns are Series, not DataFrame (in case of duplicates)
+                net_income_col = df['net_income']
+                total_equity_col = df['total_equity']
+                
+                if isinstance(net_income_col, pd.DataFrame):
+                    net_income_col = net_income_col.iloc[:, 0]  # Take first column
+                if isinstance(total_equity_col, pd.DataFrame):
+                    total_equity_col = total_equity_col.iloc[:, 0]  # Take first column
+                
+                # Convert to numeric and handle zeros/nulls
+                net_income = pd.to_numeric(net_income_col, errors='coerce').fillna(0)
+                total_equity = pd.to_numeric(total_equity_col, errors='coerce')
+                total_equity = total_equity.replace(0, np.nan)
+                
+                # Calculate ROE directly without pandas alignment
+                df['roe'] = net_income / total_equity
+                logger.info(f"[DEBUG] Calculated ROE for {df['roe'].notna().sum()} records")
+            
+            # Calculate Debt-to-Equity Ratio = Total Liabilities / Total Equity  
+            if 'total_liabilities' in df.columns and 'total_equity' in df.columns:
+                # Ensure columns are Series, not DataFrame
+                total_liabilities_col = df['total_liabilities']
+                total_equity_col = df['total_equity']
+                
+                if isinstance(total_liabilities_col, pd.DataFrame):
+                    total_liabilities_col = total_liabilities_col.iloc[:, 0]
+                if isinstance(total_equity_col, pd.DataFrame):
+                    total_equity_col = total_equity_col.iloc[:, 0]
+                
+                total_liabilities = pd.to_numeric(total_liabilities_col, errors='coerce').fillna(0)
+                total_equity = pd.to_numeric(total_equity_col, errors='coerce')
+                total_equity = total_equity.replace(0, np.nan)
+                
+                df['debt_to_equity'] = total_liabilities / total_equity
+                logger.info(f"[DEBUG] Calculated debt_to_equity for {df['debt_to_equity'].notna().sum()} records")
+            
+            # Set CAPEX as absolute value of investing cash outflows (if negative, make positive)
+            if 'capex' in df.columns:
+                capex_col = df['capex']
+                if isinstance(capex_col, pd.DataFrame):
+                    capex_col = capex_col.iloc[:, 0]
+                    
+                capex = pd.to_numeric(capex_col, errors='coerce')
+                df['capex'] = np.abs(capex)
+                df.loc[df['capex'] == 0, 'capex'] = np.nan  # Set zero values to NaN
+                logger.info(f"[DEBUG] Processed CAPEX for {df['capex'].notna().sum()} records")
+                
+        except Exception as e:
+            logger.warning(f"[DEBUG] Error calculating financial ratios: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def fetch_and_save_financial_reports_for_year(self, year: int, report_type: str) -> int:
+        """
+        Fetches financial reports for all listed companies for a given year and report type,
+        respecting API rate limits.
+{{ ... }}
+        Args:
+            year (int): The business year.
+            report_type (str): The report code (e.g., '11011' for Annual).
+
+        Returns:
+            int: The number of successfully fetched and saved reports.
+        """
+        if self.db_only_mode or not self.dart:
+            logger.error("Fetcher is in DB-only mode or DART API is not configured. Cannot fetch new financials.")
+            return 0
+
+        corp_codes = self._get_all_corp_codes()
+        if not corp_codes:
+            logger.warning("No corporation codes found to fetch data for.")
+            return 0
+
+        logger.info(f"Starting financial report fetch for {len(corp_codes)} companies for {year} ({report_type})...")
+        success_count = 0
+        total_count = len(corp_codes)
+        
+        # Rate limiting parameters
+        MAX_CALLS_PER_MINUTE = 900  # Safety margin below 1000
+        call_count = 0
+        start_time = time.time()
+
+        for i, (corp_code, stock_code) in enumerate(corp_codes):
+            try:
+                # Check if data already exists
+                if self._check_if_data_exists(stock_code, year, report_type):
+                    logger.debug(f"[{i+1}/{total_count}] Skipping {stock_code} for {year} ({report_type}): Data already exists.")
+                    # This doesn't count as an API call, but we count it as a success if it exists
+                    success_count += 1
+                    continue
+
+                # Check rate limit before making a call
+                if call_count >= MAX_CALLS_PER_MINUTE:
+                    elapsed_time = time.time() - start_time
+                    if elapsed_time < 60:
+                        sleep_time = 60 - elapsed_time
+                        logger.info(f"Rate limit reached. Pausing for {sleep_time:.2f} seconds...")
+                        time.sleep(sleep_time)
+                    # Reset counter and timer
+                    call_count = 0
+                    start_time = time.time()
+
+                logger.debug(f"[{i+1}/{total_count}] Fetching report for {corp_code} ({stock_code})...")
+                df = self.dart.finstate(corp_code, year, report_type)
+                call_count += 1 # Increment after the API call
+
+                if df is not None and not df.empty:
+                    self._save_report(df, stock_code, year, report_type)
+                    success_count += 1
+                    logger.debug(f"Successfully saved report for {stock_code}")
+                else:
+                    logger.warning(f"No financial data returned for {corp_code} ({stock_code}) for the period.")
+
+            except Exception as e:
+                # DART API may return error for companies with no data for the requested period
+                logger.error(f"Failed to fetch or save report for {corp_code} ({stock_code}): {e}")
+
+        logger.info(f"Completed fetch for {year} ({report_type}). Successfully processed {success_count}/{total_count} reports.")
+        return success_count
 
     def _fetch_and_store_for_ticker(self, ticker: str, year: int, report_code: str) -> bool:
         corp_code = self.find_corp_code(ticker)
