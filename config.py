@@ -41,7 +41,7 @@ class Config:
         # --- Data & Path Settings ---
         self.data_settings = self._raw_config.get('data_settings', {})
         self.db_path: str = self.data_settings.get('db_path', 'db/krx_data.db')
-        self.start_date: str = self.data_settings.get('start_date', '2022-01-01')
+        self.start_date: str = self.data_settings.get('start_date', '2020-07-01')
         self.end_date: str = self.data_settings.get('end_date', '2025-09-30')
 
         # --- Risk Settings ---
