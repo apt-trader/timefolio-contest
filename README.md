@@ -135,23 +135,51 @@ python -m fetchers.financial_fetcher --all -s 2024 -e 2024
 
 ### **Step 2: Find Optimal Parameters (Research Phase)**
 
-This may take several hours. Results are saved in `tuning_results.db`.
+**Strategic Focus**: Train on 2023-2024 period (current market regime) while excluding the anomalous COVID era (2020-2022).
+
+**Objectives (in order of priority)**:
+1. **Sharpe Ratio Optimization**: Target 1.0+ for contest competitiveness
+2. **Risk-Adjusted Returns**: Achieve 25-35% annualized returns with controlled volatility
+3. **Drawdown Management**: Keep maximum drawdown under 15% for capital preservation
+4. **Factor Balance**: Learn from realistic market conditions with proper Value/Momentum/Quality rotations
+5. **Parameter Robustness**: Avoid overfitting to unrepeatable market anomalies
+
+**Time Estimation**: 2-4 hours with parallelization, 7-10 hours single-threaded (300 trials).
 
 ```bash
-# A strong, professional recommendation
-python tuner.py --n-trials 300 --study-name "final-model-tuning-v1" --n-jobs -1
+# Full hyperparameter tuning on strategic period
+python tuner.py --start-date 2023-01-01 --end-date 2024-12-27 --n-trials 300 \
+ --study-name "final-model-tuning-v1" --n-jobs -1
+```
+
+```bash
+# Test optimized parameters on full strategic period
+python test_improvement.py
 ```
 
 After the run, copy the "Best Parameters" from the output into your `config.yaml`.
 
 ### **Step 3: Validate Strategy (Verification Phase)**
 
-Run a full backtest using your tuned parameters to confirm performance.
+**Purpose**: Stress-test your 2023-2024 optimized parameters against the anomalous COVID era.
+
+**Why Test on 2020-2022?**
+- **Out-of-Sample Validation**: Parameters never saw this data during training
+- **Robustness Check**: Extreme market conditions (zero rates, massive stimulus, everything-rally)
+- **Risk Assessment**: Ensures strategy won't catastrophically fail in unusual market regimes
+- **Confidence Building**: If strategy survives COVID era, it's likely robust for future volatility
+
+**Expected Results**: Strategy should show reasonable performance (not optimal, but stable) during this stress test period.
 
 ```bash
-# This command now serves as a stress test on the volatile 2020-2022 period.
+# Stress test: Run backtest on excluded COVID period for robustness validation
 python backtester.py --start 2020-01-01 --end 2022-12-31
 ```
+
+**Success Criteria**: 
+- No catastrophic failures or extreme drawdowns (>50%)
+- Sharpe ratio should remain positive (>0.2)
+- Strategy adapts reasonably to different market regimes
 
 ### **Step 4: Generate Final Portfolio (Production Run)**
 
