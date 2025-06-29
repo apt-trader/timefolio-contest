@@ -9,22 +9,27 @@ data_settings:
   # Global date range for backtesting and analysis.
   # It is recommended to use at least 3-4 years of data.
   start_date: '2020-01-01'
-  end_date: '2025-06-24'
+  end_date: '2025-06-27' 
 
 # --- Model Training Settings ---
 training_settings:
-  start_date: '2020-01-01'
+  # This is the period used for finding optimal parameters (tuning) and training the model during RESEARCH.
+  # It should reflect the most relevant market regime.
+  start_date: '2023-01-01'
   end_date: '2024-12-31'
   rebalance_frequency: 'M'      # Frequency for recalculating factors during training (M=Month-end)
   forward_return_period: 21     # Horizon for forward returns used as prediction target (in trading days)
 
 # --- Portfolio Optimization Parameters ---
 optimization_settings:
-  max_positions: 10           # Cardinality constraint (max number of stocks)
-  individual_limit: 0.35      # Max weight for any single stock
-  min_weight: 0.01            # Min weight for any single stock
-  risk_aversion: 1.25         # Tunable: How much to penalize risk. Higher = more conservative portfolio.
-  l2_penalty: 0.2             # Tunable: Regularization to prevent overfitting and encourage diversification.
+  # --- Heuristic & Constraints ---
+  # In the first step of the heuristic, we select the top N assets by expected return.
+  max_positions: 15           # Controls the size of the candidate universe passed to the QP solver.
+  individual_limit: 0.15      # Max weight for any single stock (enforced in solver).
+  sector_limits_path: "market_sectors.csv"  # Path to the file with dynamic sector deviation limits.
+
+  # --- Objective Function Tuning ---
+  risk_aversion: 1.25         # Tunable: How much to penalize risk (λ). Higher = more conservative portfolio.
 
 # --- Risk Monitoring Settings ---
 risk_settings:
