@@ -91,15 +91,20 @@ class DataManager:
                 logger.error(f"Sector universe file not found at: {sector_file_path}")
                 return False
             
-            # Correctly read the CSV with all 4 columns and utf-8 encoding.
+            # Read the CSV with utf-8 encoding, handling trailing commas
             sector_df = pd.read_csv(
                 sector_file_path,
-                dtype={'섹터코드': str, '섹터명': str, '종목코드': str, '종목명': str},
                 encoding='utf-8'
             )
+            
+            # Drop any completely empty columns (from trailing commas)
+            sector_df = sector_df.dropna(axis=1, how='all')
 
-            # The CSV is malformed. The actual content is: '섹터명' -> ticker, '종목코드' -> company name
-            sector_df.rename(columns={'종목코드': 'company_name', '섹터명': 'code', '섹터코드': 'sector_code'}, inplace=True)
+            # Fix the actual CSV structure: 섹터코드 contains stock codes, 종목코드 contains company names
+            sector_df.rename(columns={'섹터코드': 'code', '종목코드': 'company_name'}, inplace=True)
+            
+            # Add a default sector code since we don't have actual sector information in this CSV
+            sector_df['sector_code'] = 'DEFAULT'
 
             # Clean the ticker code by removing the leading 'A'.
             sector_df['code'] = sector_df['code'].str.replace('A', '', regex=False)
