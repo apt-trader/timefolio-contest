@@ -149,7 +149,7 @@ python -m fetchers.financial_fetcher --all -s 2024 -e 2024
 ```bash
 # Full hyperparameter tuning on strategic period
 python tuner.py --start-date 2023-01-01 --end-date 2024-12-27 --n-trials 300 \
- --study-name "final-model-tuning-v1" --n-jobs -4
+ --study-name "final-model-tuning-v1" --n-jobs 4
 ```
 
 ```bash
