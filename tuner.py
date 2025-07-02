@@ -39,7 +39,7 @@ logger = logging.getLogger("HyperparameterTuner")
 BASE_CONFIG_PATH = 'config/config.yaml'
 DEFAULT_N_TRIALS = 50
 DEFAULT_STUDY_NAME = 'final-model-tuning-v1'
-DEFAULT_DB_URL = 'sqlite:///tuning_results.db'
+DEFAULT_DB_URL = 'sqlite:///db/tuning_results.db'
 
 # Parameter search spaces
 PARAM_SPACES = {
