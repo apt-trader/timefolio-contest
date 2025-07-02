@@ -189,6 +189,30 @@ Execute the main pipeline to generate the portfolio for the upcoming period.
 python main.py --output-dir output/
 ```
 
+### **Step 5: Market Cycle Analysis (Research Tool)**
+
+Use the advanced FFT analysis tool to understand cyclical patterns in market data, validate strategy parameters, and gain deeper insights into individual stock behaviors.
+
+**Key Use Cases:**
+- **Market Analysis**: Analyze KOSPI cycles to validate momentum windows
+- **Stock Research**: Deep-dive into individual stock cyclical patterns
+- **Parameter Validation**: Confirm that optimized parameters align with market rhythms
+- **Regime Analysis**: Study macro indicators (VIX, yield curve) for market insights
+
+```bash
+# Analyze Samsung Electronics cyclical patterns
+python fft.py 005930 -s 2023-01-01 -e 2024-06-01
+
+# Study KOSPI market cycles to validate momentum windows
+python fft.py KOSPI -s 2023-01-01 -e 2024-12-27
+
+# Macro regime analysis
+python fft.py vix -s 2022-01-01 -e 2024-12-31
+python fft.py us10y2y -s 2022-01-01 -e 2024-12-31
+```
+
+**Interpretation**: The tool identifies dominant cyclical periods (e.g., 30-day, 102-day cycles) and their relative strength. This helps validate whether your optimized momentum window (e.g., 48 days) aligns with actual market cycles.
+
 ---
 
 ## Technical Framework
