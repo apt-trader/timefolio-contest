@@ -580,7 +580,7 @@ class DataManager:
         )
 
         # 8. Load manually added forbidden tickers and combine with dynamic filters
-        from .compliance_filters import load_forbidden_tickers
+        from compliance_filters import load_forbidden_tickers
         manual_forbidden = load_forbidden_tickers('forbidden.csv')
         dynamic_forbidden = filter_results['all']
         forbidden_tickers = dynamic_forbidden.union(manual_forbidden)
