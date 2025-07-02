@@ -100,33 +100,37 @@ class DataManager:
             # Drop any completely empty columns (from trailing commas)
             sector_df = sector_df.dropna(axis=1, how='all')
 
-            # Fix the actual CSV structure: 섹터코드 contains stock codes, 종목코드 contains company names
-            sector_df.rename(columns={'섹터코드': 'code', '종목코드': 'company_name'}, inplace=True)
+            # Fix the CSV structure: the first column is sector codes, second is stock codes
+            # Reset index to make sector codes a regular column
+            sector_df = sector_df.reset_index()
             
-            # Add a default sector code since we don't have actual sector information in this CSV
-            sector_df['sector_code'] = 'DEFAULT'
+            # Correct column mapping based on actual CSV structure
+            sector_df.rename(columns={
+                'index': 'sector_code',          # CD, IT, etc. (was index)
+                '섹터코드': 'code',              # A000040, etc. (was 섹터코드)
+                '종목코드': 'company_name'       # KR모터스, etc. (was 종목코드)
+            }, inplace=True)
+        
+            # Clean the ticker code by removing the leading 'A' prefix only
+            if 'code' in sector_df.columns:
+                sector_df['code'] = sector_df['code'].str.replace('^A', '', regex=True)
+            else:
+                logger.error(f"'code' column not found. Available columns: {sector_df.columns.tolist()}")
 
-            # Clean the ticker code by removing the leading 'A'.
-            sector_df['code'] = sector_df['code'].str.replace('A', '', regex=False)
-
-            # Normalize company names for a robust merge.
-            self.listing_info['normalized_name'] = self.listing_info['name'].apply(self._normalize_company_name)
-            sector_df['normalized_name'] = sector_df['company_name'].apply(self._normalize_company_name)
-
-            # Merge on the normalized name.
-            merged_df = pd.merge(self.listing_info, sector_df, on='normalized_name', how='inner')
+            # Since we have direct stock code mapping, merge on stock codes
+            # Ensure both have string type for consistent merging
+            self.listing_info['code'] = self.listing_info['code'].astype(str)
+            sector_df['code'] = sector_df['code'].astype(str)
+        
+            # Merge on stock codes
+            merged_df = pd.merge(self.listing_info, sector_df, on='code', how='inner')
 
             if merged_df.empty:
-                logger.warning("Sector map is empty after merging. Check for name mismatches between listing info and sector file.")
-                # For debugging, let's see what the normalized names look like from both sources.
-                logger.info("Sample normalized names from listing_info (DB):")
-                logger.info(self.listing_info[['name', 'normalized_name']].head(10))
-                logger.info("Sample normalized names from sector_df (CSV):")
-                logger.info(sector_df[['company_name', 'normalized_name', 'code']].head(10))
+                logger.warning("Sector map is empty after merging. Check for code mismatches between listing info and sector file.")
                 self.sector_map = {}
             else:
-                # Use 'code_x' because 'code' column is duplicated after merge
-                self.sector_map = merged_df.set_index('code_x')['sector_code'].to_dict()
+                # Create sector map: code -> sector_code
+                self.sector_map = merged_df.set_index('code')['sector_code'].to_dict()
                 logger.info(f"Successfully built sector map with {len(self.sector_map)} entries.")
             
             return True
@@ -575,8 +579,15 @@ class DataManager:
             end_date=end_date
         )
 
-        # 8. Exclude filtered tickers and finalize the universe
-        forbidden_tickers = filter_results['all']
+        # 8. Load manually added forbidden tickers and combine with dynamic filters
+        from .compliance_filters import load_forbidden_tickers
+        manual_forbidden = load_forbidden_tickers('forbidden.csv')
+        dynamic_forbidden = filter_results['all']
+        forbidden_tickers = dynamic_forbidden.union(manual_forbidden)
+        
+        logger.info(f"Manual forbidden tickers: {len(manual_forbidden)}")
+        logger.info(f"Dynamic forbidden tickers: {len(dynamic_forbidden)}")
+        logger.info(f"Total forbidden tickers: {len(forbidden_tickers)}")
         final_tickers = sorted([t for t in initial_universe['code'].tolist() if t not in forbidden_tickers])
         final_sector_map = initial_universe[initial_universe['code'].isin(final_tickers)].set_index('code')['sector'].to_dict()
 
