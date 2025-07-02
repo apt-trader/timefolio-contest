@@ -35,7 +35,7 @@ The system is organized into distinct, decoupled modules.
 ```
 /timefolio-2025
 ├── main.py                     # Main pipeline for a single-period run.
-├── backtester.py               # Simulates strategy performance over time.
+
 ├── tuner.py                    # Hyperparameter optimization using Optuna.
 ├── config.py                   # Centralized configuration handler.
 ├── data_manager.py             # Data access layer, orchestrates fetchers.
@@ -63,7 +63,7 @@ The project follows a professional quantitative research and production lifecycl
 
 1. **Data Population:** Use the standalone `fetchers` to populate a local SQLite database with market, fundamental, and macro data. This is done once or periodically to keep the local data store fresh.
 2. **Strategy Research & Tuning:** Use `tuner.py` to run dozens or hundreds of backtests, automatically finding the optimal parameters (e.g., factor windows, risk aversion) that maximize historical performance.
-3. **Validation:** Update `config.yaml` with the best parameters found by the tuner. Then, use `backtester.py` to run a single, full backtest to generate a detailed performance report and equity curve for the final, tuned strategy.
+3. **Validation:** Update `config.yaml` with the best parameters found by the tuner for live trading deployment.
 4. **Production Run:** Execute `main.py` to generate the final portfolio for the upcoming period using the validated, optimal configuration.
 
 ---
@@ -159,37 +159,7 @@ python test_improvement.py
 
 After the run, copy the "Best Parameters" from the output into your `config.yaml`.
 
-### **Step 3: Validate Strategy (Verification Phase)**
-
-**Purpose**: Stress-test your 2023-2024 optimized parameters against the anomalous COVID era.
-
-**Why Test on 2020-2022?**
-- **Out-of-Sample Validation**: Parameters never saw this data during training
-- **Robustness Check**: Extreme market conditions (zero rates, massive stimulus, everything-rally)
-- **Risk Assessment**: Ensures strategy won't catastrophically fail in unusual market regimes
-- **Confidence Building**: If strategy survives COVID era, it's likely robust for future volatility
-
-**Expected Results**: Strategy should show reasonable performance (not optimal, but stable) during this stress test period.
-
-```bash
-# Stress test: Run backtest on excluded COVID period for robustness validation
-python backtester.py --start 2020-01-01 --end 2022-12-31
-```
-
-**Success Criteria**: 
-- No catastrophic failures or extreme drawdowns (>50%)
-- Sharpe ratio should remain positive (>0.2)
-- Strategy adapts reasonably to different market regimes
-
-### **Step 4: Generate Final Portfolio (Production Run)**
-
-Execute the main pipeline to generate the portfolio for the upcoming period.
-
-```bash
-python main.py --output-dir output/
-```
-
-### **Step 5: Market Cycle Analysis (Research Tool)**
+### **Step 3: Market Cycle Analysis (Research Tool)**
 
 Use the advanced FFT analysis tool to understand cyclical patterns in market data, validate strategy parameters, and gain deeper insights into individual stock behaviors.
 
@@ -224,6 +194,15 @@ The generated PNG contains three key analysis panels:
 
 **Strategic Validation**: Compare identified cycles (e.g., 30-day dominant cycle) with your optimized momentum window (e.g., 48 days) to confirm your strategy captures genuine market rhythms rather than noise.
 
+
+### **Step 4: Generate Final Portfolio (Production Run)**
+
+Execute the main pipeline to generate the portfolio for the upcoming period.
+
+```bash
+python main.py --output-dir output/
+```
+
 ---
 
 ## Technical Framework
@@ -257,7 +236,7 @@ All outputs are saved to the directory specified by `--output-dir` (default: `ou
 - **Final Portfolio**: `final_portfolio.csv`
 - **Risk Report**: `risk_report_{timestamp}.txt`
 
-### From `backtester.py` (Validation Run)
+
 - **Performance Summary**: `backtest_summary.txt`
 - **Equity Curve Plot**: `backtest_equity_curve.png`
 - **Daily Returns Series**: `backtest_returns.csv`
