@@ -37,7 +37,12 @@ class FactorEngine:
             settings (Dict[str, Any]): Configuration settings for the factor engine.
         """
         self.settings = settings if settings is not None else {}
-        self.small_cap_threshold = self.settings.get('small_cap_threshold', 1_000_000_000_000)
+        # Handle both Config object and dictionary
+        if hasattr(self.settings, 'get'):
+            self.small_cap_threshold = self.settings.get('small_cap_threshold', 1_000_000_000_000)
+        else:
+            # Config object - access attributes directly
+            self.small_cap_threshold = getattr(self.settings, 'small_cap_threshold', 1_000_000_000_000)
         self.model: Pipeline = None
         self.feature_names: List[str] = None
         self.latest_market_caps: pd.Series = None
@@ -65,61 +70,59 @@ class FactorEngine:
 
         # If fundamentals is a DataFrame with multiple rows, take the most recent (last) row
         if isinstance(fundamentals, pd.DataFrame):
-            print(f"[DEBUG] DataFrame with {len(fundamentals)} rows, {len(fundamentals.columns)} columns")
-            if len(fundamentals) > 1:
-                fundamentals = fundamentals.iloc[-1]  # Take the last row as a Series
-                print(f"[DEBUG] Took last row, now type: {type(fundamentals)}")
-            elif len(fundamentals) == 1:
-                fundamentals = fundamentals.iloc[0]  # Take the single row as a Series
-                print(f"[DEBUG] Took single row, now type: {type(fundamentals)}")
-            else:
-                # Empty DataFrame
-                fundamentals = pd.Series(index=market_caps.index, dtype=float)
-        
-        # Now fundamentals should be a Series, align with market_caps
-        if isinstance(fundamentals, pd.Series):
-            print(f"[DEBUG] Series shape: {fundamentals.shape}")
+            print(f"[DEBUG] DataFrame fundamentals shape: {fundamentals.shape}")
             print(f"[DEBUG] Market caps shape: {market_caps.shape}")
+            print(f"[DEBUG] Fundamentals index (first 5): {fundamentals.index[:5].tolist()}")
+            print(f"[DEBUG] Market caps index (first 5): {market_caps.index[:5].tolist()}")
             
-            # Reindex fundamentals to match market_caps index
-            fundamentals = fundamentals.reindex(market_caps.index)
-            print(f"[DEBUG] After reindex, fundamentals shape: {fundamentals.shape}")
+            # Align fundamentals with market_caps by ticker
+            common_tickers = market_caps.index.intersection(fundamentals.index)
+            print(f"[DEBUG] Common tickers: {len(common_tickers)} out of {len(market_caps)}")
             
-            # Calculate ratios - these should be 1D Series
-            total_equity = fundamentals.get('total_equity')
-            net_income = fundamentals.get('net_income')
-            revenue = fundamentals.get('revenue')
-            operating_cash_flow = fundamentals.get('operating_cash_flow')
+            # Filter both to common tickers
+            aligned_market_caps = market_caps[common_tickers]
+            aligned_fundamentals = fundamentals.loc[common_tickers]
+            
+            # Extract financial columns as Series indexed by ticker
+            total_equity = aligned_fundamentals.get('total_equity')
+            net_income = aligned_fundamentals.get('net_income')
+            revenue = aligned_fundamentals.get('revenue')
+            operating_cash_flow = aligned_fundamentals.get('operating_cash_flow')
             
             print(f"[DEBUG] total_equity type: {type(total_equity)}, shape: {getattr(total_equity, 'shape', 'N/A')}")
+            print(f"[DEBUG] total_equity non-null: {total_equity.notna().sum() if total_equity is not None else 'N/A'}")
             
-            # Handle case where .get() returns a scalar or Series
-            if np.isscalar(total_equity) or total_equity is None:
-                b2p = pd.Series(total_equity if total_equity is not None else np.nan, index=market_caps.index) / market_caps
-            else:
-                b2p = total_equity / market_caps
-                
-            if np.isscalar(net_income) or net_income is None:
-                e2p = pd.Series(net_income if net_income is not None else np.nan, index=market_caps.index) / market_caps
-            else:
-                e2p = net_income / market_caps
-                
-            if np.isscalar(revenue) or revenue is None:
-                s2p = pd.Series(revenue if revenue is not None else np.nan, index=market_caps.index) / market_caps
-            else:
-                s2p = revenue / market_caps
-                
-            if np.isscalar(operating_cash_flow) or operating_cash_flow is None:
-                c2p = pd.Series(operating_cash_flow if operating_cash_flow is not None else np.nan, index=market_caps.index) / market_caps
-            else:
-                c2p = operating_cash_flow / market_caps
-                
-            print(f"[DEBUG] Final b2p shape: {getattr(b2p, 'shape', 'N/A')}")
-            
+            # Use aligned market caps for calculations
+            market_caps = aligned_market_caps
         else:
-            logger.warning("Value factors: Unexpected fundamentals data structure. Returning NaNs.")
+            print(f"[DEBUG] Non-DataFrame input: {type(fundamentals)}")
             nan_series = pd.Series(np.nan, index=market_caps.index)
             return nan_series, nan_series, nan_series, nan_series
+        
+        # Now calculate ratios with properly aligned data
+        # Handle case where .get() returns a scalar or Series
+        if np.isscalar(total_equity) or total_equity is None:
+            b2p = pd.Series(total_equity if total_equity is not None else np.nan, index=market_caps.index) / market_caps
+        else:
+            b2p = total_equity / market_caps
+            
+        if np.isscalar(net_income) or net_income is None:
+            e2p = pd.Series(net_income if net_income is not None else np.nan, index=market_caps.index) / market_caps
+        else:
+            e2p = net_income / market_caps
+            
+        if np.isscalar(revenue) or revenue is None:
+            s2p = pd.Series(revenue if revenue is not None else np.nan, index=market_caps.index) / market_caps
+        else:
+            s2p = revenue / market_caps
+            
+        if np.isscalar(operating_cash_flow) or operating_cash_flow is None:
+            c2p = pd.Series(operating_cash_flow if operating_cash_flow is not None else np.nan, index=market_caps.index) / market_caps
+        else:
+            c2p = operating_cash_flow / market_caps
+            
+        print(f"[DEBUG] Final b2p shape: {getattr(b2p, 'shape', 'N/A')}")
+        print(f"[DEBUG] B2P non-null count: {b2p.notna().sum() if hasattr(b2p, 'notna') else 'N/A'}")
         
         return b2p, e2p, s2p, c2p
 
@@ -265,19 +268,13 @@ class FactorEngine:
             
         logger.debug(f"Fundamentals shape after processing: {getattr(fundamentals, 'shape', 'Series')}")
         
-        # Ensure fundamentals is a Series for value factor calculation
-        if isinstance(fundamentals, pd.DataFrame):
-            if len(fundamentals) == 1:
-                # Single row DataFrame - convert to Series
-                fundamentals = fundamentals.iloc[0]
-            elif len(fundamentals) > 1:
-                # Multiple rows - take the last row as the most recent
-                fundamentals = fundamentals.iloc[-1]
-            else:
-                # Empty DataFrame - create empty Series
-                fundamentals = pd.Series(index=prices.columns, dtype=float)
+        # Keep fundamentals as DataFrame - it should contain multiple companies' data
+        # Only convert to Series if it's actually a single-company dataset
+        if isinstance(fundamentals, pd.DataFrame) and len(fundamentals) == 0:
+            # Empty DataFrame - create empty Series
+            fundamentals = pd.Series(index=prices.columns, dtype=float)
                 
-        logger.debug(f"Fundamentals converted to Series shape: {getattr(fundamentals, 'shape', 'N/A')}")
+        logger.debug(f"Fundamentals shape for factor calculation: {getattr(fundamentals, 'shape', 'N/A')}")
         
         # Ensure market_caps is a 1D Series for the current date
         if isinstance(self.latest_market_caps, pd.DataFrame):
