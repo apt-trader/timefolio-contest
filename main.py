@@ -310,6 +310,21 @@ def main():
     dm.market_caps = dm.market_caps[compliant_tickers]
     dm.returns = dm.returns[compliant_tickers]
     
+    # Filter financial data to match compliant universe
+    logger.info("Filtering financial data to match compliant universe...")
+    if hasattr(dm, 'latest_fundamentals') and not dm.latest_fundamentals.empty:
+        # Filter latest_fundamentals to only compliant tickers
+        original_fundamentals_count = len(dm.latest_fundamentals)
+        dm.latest_fundamentals = dm.latest_fundamentals[dm.latest_fundamentals.index.isin(compliant_tickers)]
+        logger.info(f"Latest fundamentals: {original_fundamentals_count} -> {len(dm.latest_fundamentals)} tickers")
+    
+    if hasattr(dm, 'historical_fundamentals') and dm.historical_fundamentals:
+        # Filter historical_fundamentals dict to only compliant tickers
+        original_hist_count = len(dm.historical_fundamentals)
+        dm.historical_fundamentals = {ticker: data for ticker, data in dm.historical_fundamentals.items() 
+                                    if ticker in compliant_tickers}
+        logger.info(f"Historical fundamentals: {original_hist_count} -> {len(dm.historical_fundamentals)} tickers")
+    
     logger.info(f"Compliance filtering complete. Final universe: {len(compliant_tickers)} tickers.")
 
     logger.info("STEP 6: Initializing FactorEngine...")
