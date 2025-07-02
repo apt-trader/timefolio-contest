@@ -10,11 +10,19 @@ from sklearn.pipeline import Pipeline
 
 logger = logging.getLogger(__name__)
 
-def _safe_get(df: pd.DataFrame, key: str, index) -> pd.Series:
-    """Safely get a column from a dataframe, returning a series of NaNs if not found."""
-    if key in df:
-        return df[key]
-    return pd.Series(np.nan, index=index)
+def _safe_get(data, key: str, index) -> pd.Series:
+    """Safely get a column/value from DataFrame or Series, returning a Series."""
+    if isinstance(data, pd.DataFrame):
+        if key in data:
+            return data[key]
+        return pd.Series(np.nan, index=index)
+    elif isinstance(data, pd.Series):
+        if key in data.index:
+            # Return single value as Series with the provided index
+            return pd.Series(data[key], index=index)
+        return pd.Series(np.nan, index=index)
+    else:
+        return pd.Series(np.nan, index=index)
 
 class FactorEngine:
     """
@@ -47,20 +55,71 @@ class FactorEngine:
 
     def _calculate_value_factors(self, fundamentals: pd.DataFrame, market_caps: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
         """Calculates value factors: B/P, E/P, S/P, C/P."""
-        if fundamentals.columns.empty:
-            logger.warning("Value factors: Fundamentals data is missing key columns. Returning NaNs.")
+        print(f"[DEBUG] _calculate_value_factors input type: {type(fundamentals)}")
+        print(f"[DEBUG] _calculate_value_factors input shape: {getattr(fundamentals, 'shape', 'N/A')}")
+        
+        if fundamentals.empty or (hasattr(fundamentals, 'columns') and fundamentals.columns.empty):
+            logger.warning("Value factors: Fundamentals data is missing or empty. Returning NaNs.")
             nan_series = pd.Series(np.nan, index=market_caps.index)
             return nan_series, nan_series, nan_series, nan_series
 
-        # Align fundamentals with market cap tickers. market_caps is already the latest series.
-        funda_aligned, cap_aligned = fundamentals.align(market_caps, axis=0, join='right')
-
-        # Use np.nan as default to ensure we return a 1D Series.
-        # This prevents the .get() from returning a DataFrame if the key is not found.
-        b2p = funda_aligned.get('total_equity', np.nan) / cap_aligned
-        e2p = funda_aligned.get('net_income', np.nan) / cap_aligned
-        s2p = funda_aligned.get('revenue', np.nan) / cap_aligned
-        c2p = funda_aligned.get('operating_cash_flow', np.nan) / cap_aligned
+        # If fundamentals is a DataFrame with multiple rows, take the most recent (last) row
+        if isinstance(fundamentals, pd.DataFrame):
+            print(f"[DEBUG] DataFrame with {len(fundamentals)} rows, {len(fundamentals.columns)} columns")
+            if len(fundamentals) > 1:
+                fundamentals = fundamentals.iloc[-1]  # Take the last row as a Series
+                print(f"[DEBUG] Took last row, now type: {type(fundamentals)}")
+            elif len(fundamentals) == 1:
+                fundamentals = fundamentals.iloc[0]  # Take the single row as a Series
+                print(f"[DEBUG] Took single row, now type: {type(fundamentals)}")
+            else:
+                # Empty DataFrame
+                fundamentals = pd.Series(index=market_caps.index, dtype=float)
+        
+        # Now fundamentals should be a Series, align with market_caps
+        if isinstance(fundamentals, pd.Series):
+            print(f"[DEBUG] Series shape: {fundamentals.shape}")
+            print(f"[DEBUG] Market caps shape: {market_caps.shape}")
+            
+            # Reindex fundamentals to match market_caps index
+            fundamentals = fundamentals.reindex(market_caps.index)
+            print(f"[DEBUG] After reindex, fundamentals shape: {fundamentals.shape}")
+            
+            # Calculate ratios - these should be 1D Series
+            total_equity = fundamentals.get('total_equity')
+            net_income = fundamentals.get('net_income')
+            revenue = fundamentals.get('revenue')
+            operating_cash_flow = fundamentals.get('operating_cash_flow')
+            
+            print(f"[DEBUG] total_equity type: {type(total_equity)}, shape: {getattr(total_equity, 'shape', 'N/A')}")
+            
+            # Handle case where .get() returns a scalar or Series
+            if np.isscalar(total_equity) or total_equity is None:
+                b2p = pd.Series(total_equity if total_equity is not None else np.nan, index=market_caps.index) / market_caps
+            else:
+                b2p = total_equity / market_caps
+                
+            if np.isscalar(net_income) or net_income is None:
+                e2p = pd.Series(net_income if net_income is not None else np.nan, index=market_caps.index) / market_caps
+            else:
+                e2p = net_income / market_caps
+                
+            if np.isscalar(revenue) or revenue is None:
+                s2p = pd.Series(revenue if revenue is not None else np.nan, index=market_caps.index) / market_caps
+            else:
+                s2p = revenue / market_caps
+                
+            if np.isscalar(operating_cash_flow) or operating_cash_flow is None:
+                c2p = pd.Series(operating_cash_flow if operating_cash_flow is not None else np.nan, index=market_caps.index) / market_caps
+            else:
+                c2p = operating_cash_flow / market_caps
+                
+            print(f"[DEBUG] Final b2p shape: {getattr(b2p, 'shape', 'N/A')}")
+            
+        else:
+            logger.warning("Value factors: Unexpected fundamentals data structure. Returning NaNs.")
+            nan_series = pd.Series(np.nan, index=market_caps.index)
+            return nan_series, nan_series, nan_series, nan_series
         
         return b2p, e2p, s2p, c2p
 
@@ -183,10 +242,62 @@ class FactorEngine:
         logger.debug(f"[{date.date()}] Calculating factors for {len(prices.columns)} tickers.")
         self.latest_market_caps = market_caps
         
-        # Align fundamentals to the same index as prices
-        fundamentals = fundamentals.reindex(prices.columns)
+        # Debug fundamentals structure
+        logger.debug(f"Fundamentals shape before processing: {fundamentals.shape}")
+        logger.debug(f"Fundamentals index: {fundamentals.index[:5] if len(fundamentals.index) > 0 else 'Empty'}")
+        logger.debug(f"Fundamentals columns: {fundamentals.columns[:5] if len(fundamentals.columns) > 0 else 'Empty'}")
+        
+        # If fundamentals has date index, get the most recent available data for each ticker
+        if isinstance(fundamentals.index, pd.DatetimeIndex):
+            # Get data up to the current date
+            available_data = fundamentals[fundamentals.index <= date]
+            if not available_data.empty:
+                # Take the most recent row for each ticker
+                fundamentals = available_data.iloc[-1]
+                logger.debug(f"Using most recent fundamental data from: {available_data.index[-1]}")
+            else:
+                logger.warning(f"No fundamental data available for date {date}")
+                fundamentals = pd.Series(index=prices.columns, dtype=float)
+        else:
+            # If not date-indexed, assume it's already properly formatted
+            # Ensure we have the right columns (tickers)
+            fundamentals = fundamentals.reindex(prices.columns)
+            
+        logger.debug(f"Fundamentals shape after processing: {getattr(fundamentals, 'shape', 'Series')}")
+        
+        # Ensure fundamentals is a Series for value factor calculation
+        if isinstance(fundamentals, pd.DataFrame):
+            if len(fundamentals) == 1:
+                # Single row DataFrame - convert to Series
+                fundamentals = fundamentals.iloc[0]
+            elif len(fundamentals) > 1:
+                # Multiple rows - take the last row as the most recent
+                fundamentals = fundamentals.iloc[-1]
+            else:
+                # Empty DataFrame - create empty Series
+                fundamentals = pd.Series(index=prices.columns, dtype=float)
+                
+        logger.debug(f"Fundamentals converted to Series shape: {getattr(fundamentals, 'shape', 'N/A')}")
+        
+        # Ensure market_caps is a 1D Series for the current date
+        if isinstance(self.latest_market_caps, pd.DataFrame):
+            # If market_caps is 2D, get the data for the current date
+            if date in self.latest_market_caps.index:
+                current_market_caps = self.latest_market_caps.loc[date]
+            else:
+                # Use the most recent available date
+                available_dates = self.latest_market_caps.index[self.latest_market_caps.index <= date]
+                if len(available_dates) > 0:
+                    current_market_caps = self.latest_market_caps.loc[available_dates[-1]]
+                else:
+                    current_market_caps = self.latest_market_caps.iloc[-1]
+        else:
+            # Already a 1D Series
+            current_market_caps = self.latest_market_caps
+            
+        print(f"[DEBUG] Current market caps shape: {getattr(current_market_caps, 'shape', 'N/A')}")
 
-        b2p, e2p, s2p, c2p = self._calculate_value_factors(fundamentals, self.latest_market_caps)
+        b2p, e2p, s2p, c2p = self._calculate_value_factors(fundamentals, current_market_caps)
         roe, lev, roe_stab = self._calculate_quality_factors(fundamentals, historical_fundamentals, date)
         gpa, opm, npm = self._calculate_profitability_factors(fundamentals)
         mom, acc, vol_mom = self._calculate_momentum_factors(prices)
