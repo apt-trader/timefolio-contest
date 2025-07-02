@@ -18,7 +18,7 @@ training_settings:
   # Excludes COVID era (2020-2022) to avoid learning wrong lessons from anomalous period
   # This period represents current market reality most relevant for contest
   start_date: '2023-01-01'
-  end_date: '2024-12-27'  # Friday - aligned with weekend data fetching schedule
+  end_date: '2024-12-27'  # Friday - aligned with weekend data fetching schedule  
   rebalance_frequency: 'M'      # Frequency for recalculating factors during training (M=Month-end)
   forward_return_period: 21     # Horizon for forward returns used as prediction target (in trading days)
 
@@ -31,7 +31,7 @@ optimization_settings:
   sector_limits_path: "market_sectors.csv"  # Path to the file with dynamic sector deviation limits.
 
   # --- Objective Function Tuning ---
-  risk_aversion: 1.25         # Tunable: How much to penalize risk (λ). Higher = more conservative portfolio.
+  risk_aversion: 0.26710742303151985  # Optimized: How much to penalize risk (λ). Higher = more conservative portfolio.
 
 # --- Risk Monitoring Settings ---
 risk_settings:
@@ -50,7 +50,7 @@ risk_management:
 factor_settings:
   # --- Time Windows for Factor Calculations ---
   # Momentum windows (exactly 3 required)
-  mom_windows: [21, 63, 252]           # Short, medium, and long-term momentum windows
+  mom_windows: [48, 63, 252]           # Optimized: Short (48), medium, and long-term momentum windows
   
   # Reversal windows (for short-term reversal factors)
   short_term_reversal_windows: [5]     # Windows for short-term reversal factors
@@ -66,9 +66,13 @@ factor_settings:
   rsi_window: 14                       # RSI calculation window
   
   # --- Model Configuration ---
-  n_pca_components: 5                  # Number of principal components for PCR
+  n_pca_components: 11                 # Optimized: Number of principal components for PCR
   prediction_target_days: 21           # Forecast horizon for return predictions
   n_folds: 5                           # Number of cross-validation folds
+  
+  # --- Regularization Parameters (Optimized) ---
+  l2_penalty: 0.5359020654520664       # L2 regularization for factor model
+  cov_l2_alpha: 0.08768931213718567    # L2 regularization for covariance estimation
   
   # Feature Analysis
   feature_importance:
