@@ -313,7 +313,7 @@ def main():
 
     logger.info("STEP 9: Running final portfolio construction pipeline...")
     final_weights = run_pipeline(cfg, dm, factor_engine, optimizer)
-
+    
     if final_weights is None or final_weights.empty:
         logger.warning("Optimization did not produce a portfolio. No risk analysis will be run.")
     else:
@@ -325,7 +325,7 @@ def main():
         output_dir = Path(args.output_dir)
         output_dir.mkdir(exist_ok=True)
         # Prepare final portfolio DataFrame for output
-        portfolio_df = pd.DataFrame(final_weights, columns=['percentage']).reset_index()
+        portfolio_df = final_weights.reset_index()
         portfolio_df.columns = ['code', 'percentage']
         portfolio_df['sector'] = portfolio_df['code'].map(dm.sector_map).fillna('Unknown')
         portfolio_df['percentage'] = portfolio_df['percentage'] * 100 # Convert to percentage
