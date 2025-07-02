@@ -10,7 +10,7 @@ data_settings:
   # Focus on 2023-2024 period - excludes COVID anomalous period (2020-2022)
   # End date set to Friday for weekend data fetching and Monday submissions
   start_date: '2023-01-01'
-  end_date: '2024-12-27'  # Friday - aligned with weekend data fetching schedule 
+  end_date: '2025-06-30'  # Friday - aligned with weekend data fetching schedule 
 
 # --- Model Training Settings ---
 training_settings:
@@ -18,7 +18,7 @@ training_settings:
   # Excludes COVID era (2020-2022) to avoid learning wrong lessons from anomalous period
   # This period represents current market reality most relevant for contest
   start_date: '2023-01-01'
-  end_date: '2024-12-27'  # Friday - aligned with weekend data fetching schedule  
+  end_date: '2025-06-30'  # Friday - aligned with weekend data fetching schedule  
   rebalance_frequency: 'M'      # Frequency for recalculating factors during training (M=Month-end)
   forward_return_period: 21     # Horizon for forward returns used as prediction target (in trading days)
 
