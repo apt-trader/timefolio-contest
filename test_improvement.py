@@ -1,8 +1,4 @@
 # test_improvement.py
-"""
-Simple test to confirm parameter improvements
-"""
-
 import logging
 from config import Config
 from backtester import Backtester
@@ -12,19 +8,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 def test_best_params():
-    """Test optimized parameters on full 2023-2024 strategic period"""
-    
     logger.info("Testing optimized parameters on 2023-2024 period (excludes COVID era)...")
     
-    # Load config and modify with best parameters
+    # Load config with optimized parameters (already updated in config.yaml)
     cfg = Config("config/config.yaml")
     
-    # The aggressive approach that showed 1.45 Sharpe ratio
-    cfg.optimization_settings['risk_aversion'] = 0.15
-    cfg.training_settings['n_pca_components'] = 10
-    
-    logger.info(f"Using risk_aversion: {cfg.optimization_settings['risk_aversion']}")
-    logger.info(f"Using n_pca_components: {cfg.training_settings['n_pca_components']}")
+    # Parameters from hyperparameter tuning (Sharpe: 0.9494)
+    logger.info(f"Using optimized parameters:")
+    logger.info(f"  risk_aversion: {cfg.optimization_settings['risk_aversion']}")
+    logger.info(f"  n_pca_components: {cfg.factor_settings['n_pca_components']}")
+    logger.info(f"  momentum_window: {cfg.factor_settings['mom_windows'][0]}")
+    logger.info(f"  l2_penalty: {cfg.factor_settings.get('l2_penalty', 'N/A')}")
+    logger.info(f"  cov_l2_alpha: {cfg.factor_settings.get('cov_l2_alpha', 'N/A')}")
     
     # Run backtest
     dm = DataManager(cfg, backtest_mode=True)
