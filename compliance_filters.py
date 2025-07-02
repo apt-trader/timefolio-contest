@@ -178,10 +178,23 @@ class ComplianceFilter:
     def save_forbidden_list(self, filter_results: Dict[str, Set[str]]):
         """
         Saves the consolidated list of forbidden tickers to a CSV file.
+        Preserves any manually added entries.
 
         Args:
             filter_results (Dict[str, Set[str]]): The output from apply_all_filters.
         """
+        # Load existing manual entries
+        manual_entries = []
+        if os.path.exists(self.output_file):
+            try:
+                existing_df = pd.read_csv(self.output_file, dtype={'ticker': str})
+                # Keep entries that are manual (not from dynamic filters)
+                dynamic_tickers = filter_results.get('all', set())
+                manual_entries = existing_df[~existing_df['ticker'].isin(dynamic_tickers)].to_dict('records')
+            except Exception as e:
+                logger.warning(f"Could not load existing forbidden tickers: {e}")
+        
+        # Add dynamic filter results
         rows = []
         for ticker in sorted(list(filter_results.get('all', set()))):
             reasons = [name for name, f_set in list(filter_results.items()) if name != 'all' and ticker in f_set]
@@ -191,15 +204,20 @@ class ComplianceFilter:
                 'date_added': datetime.now().strftime("%Y-%m-%d")
             })
         
-        if not rows:
+        # Combine manual and dynamic entries
+        all_rows = manual_entries + rows
+        
+        if not all_rows:
             logger.info("No tickers were filtered. 'forbidden.csv' will be empty.")
             # Create an empty file with headers
             pd.DataFrame(columns=['ticker', 'reason', 'date_added']).to_csv(self.output_file, index=False)
             return
 
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(all_rows)
+        # Remove duplicates (keep first occurrence)
+        df = df.drop_duplicates(subset=['ticker'], keep='first')
         df.to_csv(self.output_file, index=False)
-        logger.info(f"Saved {len(df)} forbidden tickers to {self.output_file}")
+        logger.info(f"Saved {len(df)} forbidden tickers to {self.output_file} ({len(manual_entries)} manual, {len(rows)} dynamic)")
 
 
 def load_forbidden_tickers(file_path: str = 'forbidden.csv') -> Set[str]:
