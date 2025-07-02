@@ -296,6 +296,22 @@ def main():
         return
     logger.info("All data loaded successfully.")
 
+    logger.info("STEP 5.5: Applying compliance filters (including manual forbidden tickers)...")
+    exec_date = pd.to_datetime(cfg.end_date)
+    compliant_tickers, compliant_sector_map = dm.run_compliance_filters_for_date(exec_date)
+    
+    # Update DataManager with filtered universe
+    dm.tickers = compliant_tickers
+    dm.sector_map = compliant_sector_map
+    
+    # Filter all data frames to only include compliant tickers
+    dm.prices = dm.prices[compliant_tickers]
+    dm.volumes = dm.volumes[compliant_tickers] 
+    dm.market_caps = dm.market_caps[compliant_tickers]
+    dm.returns = dm.returns[compliant_tickers]
+    
+    logger.info(f"Compliance filtering complete. Final universe: {len(compliant_tickers)} tickers.")
+
     logger.info("STEP 6: Initializing FactorEngine...")
     factor_engine = FactorEngine(settings=cfg.factor_settings)
     logger.info("FactorEngine initialized.")
