@@ -363,8 +363,8 @@ def main():
         portfolio_df = portfolio_df[['code', 'sector', 'percentage']]
 
         # Save results
-        weights_file = output_dir / "final_portfolio.csv"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        weights_file = output_dir / f"final_portfolio_{timestamp}.csv"
         report_file = output_dir / f"risk_report_{timestamp}.txt"
         
         portfolio_df.to_csv(weights_file, index=False)
