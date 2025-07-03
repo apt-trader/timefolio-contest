@@ -485,11 +485,19 @@ class FinancialsFetcher:
         # If date is missing, create a proxy date to avoid data loss.
         if 'report_date' not in df.columns:
             ticker_info = df['ticker'].iloc[0] if 'ticker' in df.columns and not df.empty else 'N/A'
-            logger.warning(f"DataFrame is missing 'rcept_dt'. Using year-end as a proxy report_date. Ticker: {ticker_info}")
+            logger.warning(f"DataFrame is missing 'rcept_dt'. Using proxy report_date for {report_code}. Ticker: {ticker_info}")
+            
+            # Create appropriate proxy dates based on report type
             if report_code == '11011':  # Annual report
                 df['report_date'] = pd.to_datetime(f'{year}-12-31')
+            elif report_code == '11013':  # Q1 report
+                df['report_date'] = pd.to_datetime(f'{year}-03-31')
+            elif report_code == '11012':  # Q2 report  
+                df['report_date'] = pd.to_datetime(f'{year}-06-30')
+            elif report_code == '11014':  # Q3 report
+                df['report_date'] = pd.to_datetime(f'{year}-09-30')
             else:
-                logger.error(f"Cannot determine proxy date for report_code: {report_code}. Skipping {ticker_info}.")
+                logger.error(f"Cannot determine proxy date for unknown report_code: {report_code}. Skipping {ticker_info}.")
                 return
 
         required_cols = {'corp_code', 'report_date', 'reprt_code', 'account_nm'}
