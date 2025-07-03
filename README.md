@@ -121,16 +121,13 @@ Run these scripts from the project root to download data into `krx_data.db`. It'
 # Note: The -m flag is crucial for running scripts inside a package.
 
 # 1. Fetch market data from KRX
-# ex: For the year 2022
-python -m fetchers.krx_fetcher -s 20240101 -e 20241231 --update-db
+python fetchers/krx_fetcher.py -s 20250601 -e 20250630 --update-db
 
 # 2. Fetch macroeconomic data
-# ex: For the year 2022
-python -m fetchers.macro_fetcher -s 2024-01-01 -e 2024-12-31
+python -m fetchers.macro_fetcher -s 2025-06-01 -e 2025-06-30
 
 # 3. Fetch annual financial statements from DART for all universe stocks
-# ex: For the year 2022's reports
-python -m fetchers.financial_fetcher --all -s 2024 -e 2024
+python main.py --fetch-financials --year 2025 --report-type 11011(annual), 11012(Q2), 11013(Q1), 11014(Q3)
 ```
 
 ### **Step 2: Find Optimal Parameters (Research Phase)**
