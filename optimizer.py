@@ -25,17 +25,17 @@ class PortfolioOptimizer:
         # Load optimization settings
         opt_cfg = self.cfg.optimization_settings
         self.max_positions = opt_cfg.get('max_positions', 50)
-        self.max_weight = opt_cfg.get('max_weight', 0.05)
+        self.max_weight = opt_cfg.get('individual_limit', 0.15)
         self.risk_aversion = opt_cfg.get('risk_aversion', 1.0)
         self.l2_penalty = opt_cfg.get('l2_penalty', 0.0)
         self.cov_l2_alpha = opt_cfg.get('cov_l2_alpha', 0.05)
         self.skip_rules = opt_cfg.get('skip_rules', False)
         self.verbose = opt_cfg.get('verbose', False)
         
-        # Load risk settings
-        risk_cfg = self.cfg.risk_settings
-        self.small_cap_threshold = risk_cfg.get('small_cap_threshold', 1e9)
-        self.max_small_cap_weight = risk_cfg.get('max_small_cap_weight', 0.1)
+        # Load risk management settings
+        risk_cfg = self.cfg.risk_management
+        self.small_cap_threshold = risk_cfg.get('small_cap_threshold', 1e12)  # 1T KRW default
+        self.max_small_cap_weight = risk_cfg.get('max_small_cap_weight', 0.40)  # 40% default
 
         logger.info("PortfolioOptimizer initialized.")
 
