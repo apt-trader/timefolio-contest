@@ -733,8 +733,16 @@ def main():
     advanced_models = train_advanced_factor_models(cfg, dm, factor_engine)
     
     # Also train rolling window models for dynamic factor loadings
-    logger.info("STEP 7.5: Training rolling window models for dynamic factor loadings...")
+    logger.info("STEP 7.5: Training institutional-grade rolling window models for dynamic factor loadings...")
+    
+    # Initialize rolling window model with enhanced factor engine for institutional-grade stability
+    logger.info("Initializing rolling window model with enhanced FactorEngine and StableFactorEngineer...")
     rolling_model = RollingWindowFactorModel()
+    
+    # Apply institutional-grade enhancements
+    rolling_model.enhanced_factor_engine = factor_engine  # Use the enhanced factor engine
+    rolling_model.use_enhanced_factors = True  # Enable enhanced factor processing
+    logger.info("✓ Rolling window model configured with institutional-grade enhancements")
     
     try:
         # Get training data for rolling analysis
