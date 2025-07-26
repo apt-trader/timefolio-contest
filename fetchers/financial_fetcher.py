@@ -45,6 +45,63 @@ class FinancialsFetcher:
         self._init_db_structure()
         self.ticker_to_corp_code_map = self._load_company_mapping()
         logger.info(f"FinancialsFetcher initialized for DB at {db_path}.")
+        
+    def _ensure_ticker_field_populated(self, df: pd.DataFrame) -> None:
+        """
+        CRITICAL FIX: Ensures all financial records have proper ticker linkage.
+        Reconstructs missing ticker data from corp_code using company_mapping table.
+        """
+        if df.empty:
+            return
+            
+        # Check if ticker field exists and has valid data
+        ticker_missing = (
+            'ticker' not in df.columns or 
+            df['ticker'].isna().all() or 
+            (df['ticker'] == 'None').all() or
+            df['ticker'].astype(str).str.strip().eq('').all()
+        )
+        
+        if ticker_missing:
+            logger.warning("[CRITICAL] Ticker field missing or invalid. Reconstructing from corp_code mapping...")
+            
+            # Load corp_code to ticker mapping from database
+            try:
+                with self._create_connection() as conn:
+                    mapping_query = "SELECT corp_code, ticker FROM company_mapping WHERE ticker IS NOT NULL"
+                    mapping_df = pd.read_sql_query(mapping_query, conn)
+                    
+                    if mapping_df.empty:
+                        logger.error("[CRITICAL] No company mapping data available to reconstruct tickers!")
+                        return
+                        
+                    # Create mapping dictionary
+                    corp_to_ticker = dict(zip(mapping_df['corp_code'], mapping_df['ticker']))
+                    
+                    # Map corp_codes to tickers
+                    if 'corp_code' in df.columns:
+                        df['ticker'] = df['corp_code'].map(corp_to_ticker)
+                        
+                        # Count successful mappings
+                        successful_mappings = df['ticker'].notna().sum()
+                        total_records = len(df)
+                        
+                        logger.info(f"[CRITICAL FIX] Successfully mapped {successful_mappings}/{total_records} records to tickers")
+                        
+                        if successful_mappings == 0:
+                            logger.error("[CRITICAL] No corp_codes could be mapped to tickers!")
+                        elif successful_mappings < total_records:
+                            missing_corp_codes = df[df['ticker'].isna()]['corp_code'].unique()
+                            logger.warning(f"[CRITICAL] {total_records - successful_mappings} records still missing tickers. Missing corp_codes: {missing_corp_codes[:5]}...")
+                    else:
+                        logger.error("[CRITICAL] No corp_code field available to reconstruct ticker mapping!")
+                        
+            except Exception as e:
+                logger.error(f"[CRITICAL] Failed to reconstruct ticker mapping: {e}")
+        else:
+            # Validate existing ticker data
+            valid_tickers = df['ticker'].notna().sum()
+            logger.info(f"[DEBUG] Ticker field validation: {valid_tickers}/{len(df)} records have valid tickers")
 
     def _create_connection(self) -> sqlite3.Connection:
         try:
@@ -250,10 +307,11 @@ class FinancialsFetcher:
 
     def _map_korean_to_english_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         """Maps Korean financial statement account names to English column names expected by the factor engine."""
-        # Mapping dictionary for Korean account names to English equivalents
+        # Comprehensive mapping dictionary for Korean account names to English equivalents
         korean_to_english = {
             # Balance Sheet Items
             '자산총계': 'total_assets',
+            '총자산': 'total_assets',
             '유동자산': 'current_assets', 
             '비유동자산': 'non_current_assets',
             '자본총계': 'total_equity',
@@ -268,29 +326,66 @@ class FinancialsFetcher:
             
             # Income Statement Items
             '매출액': 'revenue',
+            '수익': 'revenue',
+            '총매출': 'revenue',
+            '수익(매출액)': 'revenue',
             '당기순이익': 'net_income',
+            '순이익': 'net_income',
+            '당기순이익(손실)': 'net_income',
             '영업이익': 'operating_income',
             '매출총이익': 'gross_profit',
-            '영업활동현금흐름': 'operating_cash_flow',
+            '매출총이익(손실)': 'gross_profit',
             '법인세차감전순이익': 'pre_tax_income',
             '법인세비용차감전순이익': 'pre_tax_income',
+            '매출원가': 'cost_of_goods_sold',
             
-            # Cash Flow Statement Items
+            # Cash Flow Statement Items - Operating
+            '영업활동현금흐름': 'operating_cash_flow',
             '영업활동으로 인한 현금흐름': 'operating_cash_flow',
+            '영업에서 창출된 현금흐름': 'operating_cash_flow',
+            '영업으로부터 창출된 현금흐름': 'operating_cash_flow',
+            '영업활동으로부터의 현금유출': 'operating_cash_flow',
+            '영업활동으로부터의 현금유입': 'operating_cash_flow',
+            
+            # Cash Flow Statement Items - Investing
             '투자활동으로 인한 현금흐름': 'investing_cash_flow',
             '투자활동현금흐름': 'investing_cash_flow',
+            '투자활동으로부터의 현금유출': 'investing_cash_flow',
+            '투자활동으로부터의 현금유입': 'investing_cash_flow',
+            
+            # CAPEX (Capital Expenditure) - CRITICAL FOR CAPEX_Growth FACTOR
+            '유형자산의 취득': 'capex',  # Most common CAPEX account (38,234 records)
+            '유형자산취득': 'capex',
+            '유형자산 취득': 'capex',
+            '건설중인자산의 취득': 'capex',
+            '기계장치의 취득': 'capex',
+            '토지의 취득': 'capex',
+            '건물의 취득': 'capex',
+            '설비투자': 'capex',
             '2. 투자활동으로 인한 현금유출액': 'capex',
+            '투자활동으로 인한 현금유출액': 'capex',
+            '투자활동 현금유출': 'capex',
+            '시설투자현금유출': 'capex',
+            '자본적지출': 'capex',
+            
+            # Cash and Cash Equivalents - CRITICAL FOR C2P FACTOR
+            '현금및현금성자산': 'cash_and_equivalents',
+            '현금 및 현금성자산': 'cash_and_equivalents',
+            '현금성자산': 'cash_and_equivalents',
+            '현금': 'cash_and_equivalents',
+            '단기금융상품': 'cash_and_equivalents',
+            
+            # Financing Activities
             '재무활동현금흐름': 'financing_cash_flow',
             '재무활동으로 인한 현금흐름': 'financing_cash_flow',
+            '재무활동으로부터의 현금유출': 'financing_cash_flow',
+            '재무활동으로부터의 현금유입': 'financing_cash_flow',
             
-            # Alternative names that might appear
-            '수익': 'revenue',
-            '총자산': 'total_assets',
-            '순이익': 'net_income',
-            '총매출': 'revenue',
-            '당기순이익(손실)': 'net_income',
-            '영업에서 창출된 현금흐름': 'operating_cash_flow',
-            '영업으로부터 창출된 현금흐름': 'operating_cash_flow'
+            # Debt and Equity
+            '부채비율': 'debt_to_equity',
+            '차입금': 'total_debt',
+            '단기차입금': 'short_term_debt',
+            '장기차입금': 'long_term_debt'
         }
         
         # Rename columns using the mapping
@@ -478,6 +573,10 @@ class FinancialsFetcher:
 
     def store_financials_df(self, df: pd.DataFrame, year: int, report_code: str):
         if df.empty: return
+        
+        # CRITICAL FIX: Ensure ticker field is always populated
+        self._ensure_ticker_field_populated(df)
+        
         # Standardize column names before storing
         # Check for a date column and standardize it. If none exists, we can't store it.
         if 'rcept_dt' in df.columns:
@@ -500,7 +599,8 @@ class FinancialsFetcher:
                 logger.error(f"Cannot determine proxy date for unknown report_code: {report_code}. Skipping {ticker_info}.")
                 return
 
-        required_cols = {'corp_code', 'report_date', 'reprt_code', 'account_nm'}
+        # UPDATED: Include ticker in required columns
+        required_cols = {'corp_code', 'ticker', 'report_date', 'reprt_code', 'account_nm'}
         if not required_cols.issubset(df.columns):
             logger.error(f"Dataframe is missing one of required columns for storage: {required_cols - set(df.columns)}")
             return
