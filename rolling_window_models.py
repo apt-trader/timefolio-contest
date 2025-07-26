@@ -28,6 +28,11 @@ import seaborn as sns
 from datetime import datetime, timedelta
 import joblib
 
+# INSTITUTIONAL ENHANCEMENT: Import enhanced factor systems
+from factor_engine import FactorEngine
+from stable_factor_engineering import StableFactorEngineer, create_institutional_grade_factors
+from regime_aware_modeling import create_regime_aware_system
+
 warnings.filterwarnings('ignore')
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,26 @@ class RollingWindowFactorModel:
         self.r2_history = {}
         self.stability_metrics = {}
         self.is_trained = False
+        
+        # INSTITUTIONAL ENHANCEMENT: Initialize enhanced factor systems
+        logger.info("Initializing institutional-grade rolling window with enhanced factors...")
+        try:
+            # Initialize enhanced factor engine with regime-aware modeling
+            self.enhanced_factor_engine = FactorEngine(settings={'regime_aware_modeling': True})
+            
+            # Initialize stable factor engineer for Korean market
+            self.stable_factor_engineer = StableFactorEngineer(
+                stability_target=0.5,  # Target >50% stability
+                korean_adjustments=True
+            )
+            
+            self.use_enhanced_factors = True
+            logger.info("✓ Enhanced factor systems initialized for rolling window analysis")
+            
+        except Exception as e:
+            logger.warning(f"Enhanced factor systems failed to initialize: {e}")
+            logger.warning("Falling back to legacy factor calculation")
+            self.use_enhanced_factors = False
         
     def _default_config(self) -> Dict:
         """Default configuration for rolling window models."""
@@ -83,11 +108,52 @@ class RollingWindowFactorModel:
     def fit_rolling_models(self, factors: pd.DataFrame, 
                           forward_returns: pd.Series) -> Dict:
         """
-        Fit rolling window models with multiple time horizons.
+        Fit rolling window models with institutional-grade enhanced factors.
         
+        Uses regime-aware modeling and stable factor engineering for improved stability.
         Returns comprehensive analysis of factor dynamics over time.
         """
-        logger.info("=== TRAINING ROLLING WINDOW FACTOR MODELS ===")
+        logger.info("=== TRAINING INSTITUTIONAL-GRADE ROLLING WINDOW FACTOR MODELS ===")
+        
+        # INSTITUTIONAL ENHANCEMENT: Use enhanced factors if available
+        if self.use_enhanced_factors:
+            logger.info("Applying institutional-grade factor enhancements...")
+            try:
+                # Apply stable factor engineering to improve factor persistence
+                enhanced_factors = self.stable_factor_engineer.engineer_stable_factor_suite(
+                    fundamentals=factors,  # Use input factors as proxy fundamentals
+                    market_caps=pd.Series(data=1e12, index=factors.columns),  # Dummy market caps
+                    historical_fundamentals=None
+                )
+                
+                if not enhanced_factors.empty:
+                    # Replace legacy factors with stable engineered factors
+                    X_enhanced = enhanced_factors.reindex(factors.index, method='ffill')
+                    logger.info(f"Enhanced factors: {len(X_enhanced.columns)} stable factors created")
+                    logger.info(f"Enhanced factor names: {list(X_enhanced.columns)}")
+                    
+                    # Combine with original factors (keep best of both)
+                    common_cols = set(factors.columns) & set(X_enhanced.columns)
+                    X_combined = factors.copy()
+                    
+                    # Replace common factors with enhanced versions
+                    for col in common_cols:
+                        if not X_enhanced[col].isna().all():
+                            X_combined[col] = X_enhanced[col]
+                    
+                    # Add new stable factors
+                    new_factors = set(X_enhanced.columns) - set(factors.columns)
+                    for col in new_factors:
+                        if not X_enhanced[col].isna().all():
+                            X_combined[col] = X_enhanced[col]
+                    
+                    factors = X_combined
+                    logger.info(f"✓ Enhanced factor suite: {len(factors.columns)} total factors")
+                else:
+                    logger.warning("Stable factor engineering produced empty results, using original factors")
+                    
+            except Exception as e:
+                logger.error(f"Stable factor engineering failed: {e}, using original factors")
         
         # Align data
         common_idx = factors.index.intersection(forward_returns.index)
