@@ -15,7 +15,7 @@ from typing import Any, Dict
 # Add project root to path for clean imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from backtester import Backtester
+from etc.test.backtester import Backtester
 from data_manager import DataManager
 from config import Config
 
