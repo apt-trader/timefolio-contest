@@ -560,6 +560,36 @@ def run_ml_enhanced_pipeline(cfg: Config, dm: DataManager, factor_engine: Factor
     
     return integration_code
 
+# EXPORT FUNCTIONS FOR MAIN.PY INTEGRATION
+def train_ensemble_models(factors: pd.DataFrame, forward_returns: pd.Series) -> Dict[str, Any]:
+    """Wrapper function for main.py integration - trains ML ensemble models."""
+    logger.info("Training ML ensemble models via wrapper function...")
+    
+    try:
+        # Initialize ML ensemble
+        ml_ensemble = MLEnsembleAlphaGenerator()
+        
+        # Train ensemble
+        training_metrics = ml_ensemble.train_ensemble(factors, forward_returns)
+        
+        return {
+            'ensemble': ml_ensemble,
+            'metrics': training_metrics,
+            'model_type': 'ml_ensemble'
+        }
+        
+    except Exception as e:
+        logger.error(f"ML ensemble training failed: {e}")
+        return {
+            'ensemble': None,
+            'metrics': {},
+            'model_type': 'ml_ensemble',
+            'error': str(e)
+        }
+
+# Alias for backwards compatibility
+MLEnsemble = MLEnsembleAlphaGenerator
+
 if __name__ == "__main__":
     logger.info("ML Ensemble Alpha Generation Module initialized")
     logger.info("Advanced ML models available:")
@@ -573,3 +603,4 @@ if __name__ == "__main__":
     logger.info("3. Ensemble stacking with meta-learning")
     logger.info("4. Feature importance analysis")
     logger.info("5. Robust preprocessing and scaling")
+    logger.info("✓ train_ensemble_models wrapper function created for main.py integration")
