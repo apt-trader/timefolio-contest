@@ -1,12 +1,19 @@
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
 import logging
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.pipeline import Pipeline
+from sklearn.metrics import r2_score
+
+# INSTITUTIONAL ENHANCEMENT: Import regime-aware modeling
+from regime_aware_modeling import (
+    MarketRegimeDetector, AdaptiveWindowSizer, RegimeAwareFactorModel,
+    create_regime_aware_system
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +39,7 @@ class FactorEngine:
 
     def __init__(self, settings: Dict[str, Any] = None):
         """
-        Initializes the FactorEngine.
+        Initializes the FactorEngine with institutional-grade regime-aware modeling.
         Args:
             settings (Dict[str, Any]): Configuration settings for the factor engine.
         """
@@ -40,12 +47,34 @@ class FactorEngine:
         # Handle both Config object and dictionary
         if hasattr(self.settings, 'get'):
             self.small_cap_threshold = self.settings.get('small_cap_threshold', 1_000_000_000_000)
+            regime_enabled = self.settings.get('regime_aware_modeling', True)
         else:
             # Config object - access attributes directly
             self.small_cap_threshold = getattr(self.settings, 'small_cap_threshold', 1_000_000_000_000)
+            regime_enabled = getattr(self.settings, 'regime_aware_modeling', True)
+            
+        # Original factor model components
         self.model: Pipeline = None
         self.feature_names: List[str] = None
         self.latest_market_caps: pd.Series = None
+        
+        # INSTITUTIONAL ENHANCEMENT: Regime-aware modeling components
+        self.regime_enabled = regime_enabled
+        self.regime_detector: Optional[MarketRegimeDetector] = None
+        self.window_sizer: Optional[AdaptiveWindowSizer] = None
+        self.regime_factor_model: Optional[RegimeAwareFactorModel] = None
+        self.current_regimes: Optional[pd.Series] = None
+        self.adaptive_windows: Optional[pd.Series] = None
+        self.regime_models: Dict[int, Pipeline] = {}  # Separate models per regime
+        
+        if self.regime_enabled:
+            logger.info("Initializing regime-aware modeling components...")
+            self.regime_detector = MarketRegimeDetector(lookback_window=252, regime_count=3)
+            self.window_sizer = AdaptiveWindowSizer(base_window=252, min_window=63, max_window=756)
+            self.regime_factor_model = RegimeAwareFactorModel(self.regime_detector, self.window_sizer)
+            logger.info("Regime-aware FactorEngine initialized successfully")
+        else:
+            logger.info("Traditional FactorEngine initialized (regime-aware disabled)")
 
     def _winsorize(self, series: pd.Series, limits=(0.05, 0.05)) -> pd.Series:
         """Limits extreme values to reduce the impact of outliers."""
@@ -241,9 +270,52 @@ class FactorEngine:
 
     def calculate_factors_for_date(self, date: pd.Timestamp, prices: pd.DataFrame, volumes: pd.DataFrame, market_caps: pd.Series, fundamentals: pd.DataFrame,
                              historical_fundamentals: Dict[str, pd.DataFrame], market_prices: pd.Series = None) -> pd.DataFrame:
-        """Calculates all factors for a given date and returns a DataFrame."""
+        """Calculates all factors for a given date with institutional-grade regime-aware modeling."""
         logger.debug(f"[{date.date()}] Calculating factors for {len(prices.columns)} tickers.")
         self.latest_market_caps = market_caps
+        
+        # INSTITUTIONAL ENHANCEMENT: Regime Detection and Adaptive Modeling
+        if self.regime_enabled and self.regime_detector is not None:
+            logger.info(f"[{date.date()}] Running regime-aware factor calculation...")
+            
+            # Detect market regimes using historical price and volume data
+            try:
+                # Get sufficient historical data for regime detection (minimum 252 days)
+                regime_data_window = min(len(prices), 504)  # Up to 2 years of data
+                if regime_data_window >= 63:  # Minimum quarterly data required
+                    historical_prices = prices.iloc[-regime_data_window:]
+                    historical_volumes = volumes.iloc[-regime_data_window:] if not volumes.empty else None
+                    
+                    # Update regime detection
+                    regimes, adaptive_windows, regime_analysis = create_regime_aware_system(
+                        historical_prices, historical_volumes
+                    )
+                    
+                    # Store current regime information
+                    if not regimes.empty and date in regimes.index:
+                        current_regime = regimes.loc[date]
+                        current_window = adaptive_windows.loc[date] if date in adaptive_windows.index else 252
+                        
+                        self.current_regimes = regimes
+                        self.adaptive_windows = adaptive_windows
+                        
+                        logger.info(f"[{date.date()}] Regime detected: {current_regime}, Adaptive window: {current_window} days")
+                    else:
+                        logger.warning(f"[{date.date()}] Regime detection failed, using default settings")
+                        current_regime = 1  # Default to medium volatility regime
+                        current_window = 252
+                else:
+                    logger.warning(f"[{date.date()}] Insufficient data for regime detection ({regime_data_window} days), using defaults")
+                    current_regime = 1
+                    current_window = 252
+                    
+            except Exception as e:
+                logger.error(f"[{date.date()}] Regime detection failed: {e}, falling back to traditional calculation")
+                current_regime = 1
+                current_window = 252
+        else:
+            current_regime = 1  # Default regime
+            current_window = 252  # Default window
         
         # Debug fundamentals structure
         logger.debug(f"Fundamentals shape before processing: {fundamentals.shape}")
@@ -367,9 +439,9 @@ class FactorEngine:
 
     def train(self, factor_panel: pd.DataFrame, forward_returns: pd.Series):
         """
-        Trains a Principal Component Regression model on historical factor data.
+        Trains Principal Component Regression models with institutional-grade regime-aware capabilities.
         """
-        logger.info("Training Principal Component Regression model...")
+        logger.info("Training regime-aware PCR models...")
         n_components = self.settings.get('n_pca_components', 5)
 
         aligned_factors, aligned_returns = factor_panel.align(forward_returns, join='inner', axis=0)
@@ -386,6 +458,73 @@ class FactorEngine:
         X = aligned_factors
         y = aligned_returns.loc[X.index]
 
+        # INSTITUTIONAL ENHANCEMENT: Regime-Aware Model Training
+        if self.regime_enabled and hasattr(self, 'stable_factor_engineer'):
+            logger.info("Training regime-specific models with stable factors...")
+            
+            try:
+                # Apply stable factor engineering to improve factor persistence
+                stable_factors = self.stable_factor_engineer.engineer_stable_factors(
+                    X, aligned_returns.index
+                )
+                
+                # Update features with stable factor composites
+                if not stable_factors.empty:
+                    # Combine original factors with stable composites
+                    combined_factors = pd.concat([X, stable_factors], axis=1)
+                    # Remove any duplicate columns
+                    combined_factors = combined_factors.loc[:, ~combined_factors.columns.duplicated()]
+                    X = combined_factors
+                    self.feature_names = X.columns.tolist()
+                    logger.info(f"Enhanced with {len(stable_factors.columns)} stable factor composites")
+                
+                # Train regime-specific models if regime data is available
+                if hasattr(self, 'current_regimes') and not self.current_regimes.empty:
+                    self.regime_models = {}
+                    regime_performance = {}
+                    
+                    # Align regime data with training data
+                    regime_data = self.current_regimes.reindex(X.index, method='ffill')
+                    
+                    for regime_id in regime_data.unique():
+                        if pd.isna(regime_id):
+                            continue
+                            
+                        regime_mask = (regime_data == regime_id)
+                        regime_X = X[regime_mask]
+                        regime_y = y[regime_mask]
+                        
+                        if len(regime_X) >= max(n_components * 2, 50):  # Minimum samples per regime
+                            regime_model = Pipeline([
+                                ('scaler', StandardScaler()),
+                                ('pca', PCA(n_components=min(n_components, len(regime_X.columns)))),
+                                ('regressor', LinearRegression())
+                            ])
+                            
+                            regime_model.fit(regime_X, regime_y)
+                            self.regime_models[int(regime_id)] = regime_model
+                            
+                            # Calculate regime-specific performance
+                            regime_pred = regime_model.predict(regime_X)
+                            regime_r2 = r2_score(regime_y, regime_pred)
+                            regime_performance[int(regime_id)] = regime_r2
+                            
+                            logger.info(f"Regime {int(regime_id)} model: {len(regime_X)} samples, "
+                                      f"R² = {regime_r2:.4f}, PCA variance = "
+                                      f"{regime_model.named_steps['pca'].explained_variance_ratio_.sum():.2%}")
+                        else:
+                            logger.warning(f"Insufficient data for regime {regime_id}: {len(regime_X)} samples")
+                    
+                    if self.regime_models:
+                        logger.info(f"Trained {len(self.regime_models)} regime-specific models")
+                        self.regime_performance = regime_performance
+                    else:
+                        logger.warning("No regime models trained, falling back to universal model")
+                        
+            except Exception as e:
+                logger.error(f"Regime-aware training failed: {e}, falling back to traditional model")
+        
+        # Train universal/fallback model
         self.model = Pipeline([
             ('scaler', StandardScaler()),
             ('pca', PCA(n_components=n_components)),
@@ -393,12 +532,21 @@ class FactorEngine:
         ])
         
         self.model.fit(X, y)
-        logger.info(f"PCR Model trained successfully. PCA explained variance: {self.model.named_steps['pca'].explained_variance_ratio_.sum():.2%}")
+        universal_r2 = r2_score(y, self.model.predict(X))
+        
+        logger.info(f"Universal PCR model trained: R² = {universal_r2:.4f}, "
+                   f"PCA explained variance: {self.model.named_steps['pca'].explained_variance_ratio_.sum():.2%}")
+        
+        # Log regime vs universal performance comparison
+        if hasattr(self, 'regime_performance'):
+            avg_regime_r2 = np.mean(list(self.regime_performance.values()))
+            logger.info(f"Performance comparison - Regime-aware: {avg_regime_r2:.4f}, Universal: {universal_r2:.4f}, "
+                       f"Improvement: {((avg_regime_r2 - universal_r2) / universal_r2 * 100):.1f}%")
 
     def predict(self, latest_factors: pd.DataFrame) -> pd.Series:
         """
-        Uses the trained PCR model to predict expected returns, neutralizes them
-        against market cap, and normalizes them using cross-sectional z-scoring.
+        Uses regime-aware PCR models to predict expected returns with institutional-grade accuracy,
+        neutralizes them against market cap, and normalizes them using cross-sectional z-scoring.
         """
         if self.model is None:
             raise RuntimeError("Model must be trained before making predictions.")
@@ -412,7 +560,45 @@ class FactorEngine:
             return pd.Series(dtype=float)
 
         X = latest_factors.reindex(columns=self.feature_names, fill_value=0)
-        raw_scores = self.model.predict(X)
+        
+        # INSTITUTIONAL ENHANCEMENT: Regime-Aware Predictions
+        if (self.regime_enabled and hasattr(self, 'regime_models') and 
+            hasattr(self, 'current_regimes') and not self.current_regimes.empty):
+            
+            try:
+                # Get current regime for prediction date (use most recent available)
+                current_date = latest_factors.index[0] if len(latest_factors.index) > 0 else pd.Timestamp.now()
+                
+                # Find most recent regime detection
+                available_regime_dates = self.current_regimes.index[self.current_regimes.index <= current_date]
+                if len(available_regime_dates) > 0:
+                    latest_regime_date = available_regime_dates[-1]
+                    current_regime = int(self.current_regimes.loc[latest_regime_date])
+                    
+                    # Use regime-specific model if available
+                    if current_regime in self.regime_models:
+                        regime_model = self.regime_models[current_regime]
+                        raw_scores = regime_model.predict(X)
+                        logger.info(f"Using regime {current_regime} model for predictions "
+                                   f"(R² = {self.regime_performance.get(current_regime, 'N/A'):.4f})")
+                    else:
+                        # Fallback to universal model
+                        raw_scores = self.model.predict(X)
+                        logger.warning(f"Regime {current_regime} model not available, using universal model")
+                else:
+                    # No regime data available, use universal model
+                    raw_scores = self.model.predict(X)
+                    logger.info("No regime data available, using universal model")
+                    
+            except Exception as e:
+                logger.error(f"Regime-aware prediction failed: {e}, falling back to universal model")
+                raw_scores = self.model.predict(X)
+        else:
+            # Traditional prediction using universal model
+            raw_scores = self.model.predict(X)
+            if self.regime_enabled:
+                logger.info("Regime-aware prediction not available, using universal model")
+        
         scores_series = pd.Series(raw_scores, index=X.index, name='alpha')
 
         # --- Market Cap Neutralization ---
