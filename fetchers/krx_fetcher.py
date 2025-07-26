@@ -42,7 +42,7 @@ class KRXDataFetcher:
     def __init__(self, cache_dir: str = None, db_path: str = str(Path(__file__).parent.parent / "db" / "krx_data.db"), 
                  throttle: float = 0.5, max_retries: int = 3):
         if cache_dir is None:
-            self.cache_dir = Path(__file__).parent / 'krx_cache'
+            self.cache_dir = Path(__file__).parent.parent / 'cache' / 'krx_cache'
         else:
             self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True, parents=True)
