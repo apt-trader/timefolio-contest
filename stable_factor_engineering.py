@@ -46,19 +46,40 @@ class KoreanMarketFactorEngineer:
     Specialized factor engineering for Korean market characteristics.
     """
     
-    def __init__(self, stability_target: float = 0.5, korean_adjustments: bool = True):
+    def __init__(self, stability_target: float = 0.7, korean_adjustments: bool = True):
         """
-        Initialize Korean market factor engineer.
+        Initialize Korean market factor engineer with enhanced stability parameters.
         
         Args:
-            stability_target: Target factor stability score (0.5 = 50%)
+            stability_target: Target factor stability score (0.7 = 70% for Korean market)
             korean_adjustments: Apply Korean market-specific adjustments
         """
         self.stability_target = stability_target
         self.korean_adjustments = korean_adjustments
-        self.scaler = RobustScaler()
-        self.transformer = PowerTransformer(method='yeo-johnson')
-        logger.info(f"Initialized KoreanMarketFactorEngineer (target stability: {stability_target:.1%})")
+        
+        # ENHANCED: More aggressive stability parameters for Korean market
+        self.smoothing_params = {
+            'short_window': 21,    # 3 weeks (was implicit ~5-10 days)
+            'medium_window': 63,   # 3 months (was implicit ~30 days)
+            'long_window': 126,    # 6 months (was implicit ~60 days)
+            'ema_alpha': 0.1       # Stronger smoothing (lower = more smooth)
+        }
+        
+        self.stability_params = {
+            'outlier_threshold': 2.0,    # More aggressive outlier removal (was 2.5)
+            'winsorize_limits': (0.02, 0.98),  # Stronger winsorization (was 0.05, 0.95)
+            'volatility_cap': 0.3,       # Cap extreme volatility at 30%
+            'regime_sensitivity': 0.8    # High regime-awareness
+        }
+        
+        # Enhanced scalers for extreme Korean market volatility
+        self.scaler = RobustScaler(quantile_range=(10.0, 90.0))  # More robust to outliers
+        self.transformer = PowerTransformer(method='yeo-johnson', standardize=True)
+        
+        logger.info(f"Enhanced KoreanMarketFactorEngineer initialized:")
+        logger.info(f"  - Stability target: {stability_target:.1%}")
+        logger.info(f"  - Smoothing windows: {self.smoothing_params['short_window']}/{self.smoothing_params['medium_window']}/{self.smoothing_params['long_window']} days")
+        logger.info(f"  - Outlier threshold: {self.stability_params['outlier_threshold']}σ")
     
     def create_stable_value_composite(self, fundamentals: pd.DataFrame, market_caps: pd.Series) -> pd.Series:
         """
