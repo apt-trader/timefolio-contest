@@ -376,7 +376,7 @@ def train_advanced_factor_models(cfg: Config, dm: DataManager, factor_engine: Fa
         logger.info(f"ML ensemble: R² = {ensemble_r2:.4f}")
         
         # Save ML model
-        ml_model_path = Path("models/ml_ensemble_alpha.joblib")
+        ml_model_path = Path("etc/models/ml_ensemble_alpha.joblib")
         ml_model_path.parent.mkdir(exist_ok=True)
         ml_ensemble.save_model(str(ml_model_path))
         
