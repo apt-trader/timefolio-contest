@@ -538,6 +538,22 @@ def test_stable_factor_engineering():
     logger.info("Stable factor engineering test completed successfully!")
     return stable_factors
 
+# EXPORT ALIASES FOR MAIN.PY INTEGRATION
+# Create aliases for expected import names
+StableFactorEngineer = KoreanMarketFactorEngineer  # Alias for main.py compatibility
+
+def engineer_stable_factors(fundamentals: pd.DataFrame, dates_index) -> pd.DataFrame:
+    """Wrapper function for main.py integration."""
+    # Create dummy market caps if needed
+    if isinstance(fundamentals, pd.DataFrame) and len(fundamentals) > 0:
+        market_caps = pd.Series(
+            data=np.ones(len(fundamentals)) * 1e12,  # Dummy market caps
+            index=fundamentals.index
+        )
+        return create_institutional_grade_factors(fundamentals, market_caps)
+    else:
+        return pd.DataFrame()
+
 if __name__ == "__main__":
     # Run test
     test_factors = test_stable_factor_engineering()
@@ -546,4 +562,5 @@ if __name__ == "__main__":
     print(f"Stable factors created: {len(test_factors.columns)}")
     print(f"Factors: {list(test_factors.columns)}")
     print(f"Coverage: {test_factors.notna().sum().sum()} / {test_factors.size} values")
+    print("✓ StableFactorEngineer alias created for main.py integration")
     print("System ready for institutional deployment")
