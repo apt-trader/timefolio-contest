@@ -1,39 +1,14 @@
-# venv and caches
+# VS Code
+.vscode/
+
+# Environment variables and caches
 venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-
-#init files
-__init__.py
-fetchers/__init__.py
-
-# VS Code
-.vscode/
-
-# data folders and files
-db/
-logs/
-cache/
-output/
-test/
-
-# Environment variables
 .env
 .envrc
 .direnv/
-
-# Data CSV files
-forbidden.csv
-market_sectors.csv
-sector_universe.csv
-
-# Exclude backup directory
-backup/
-
-# Cache and log directories
-fetchers/docs_cache/
-fetchers/krx_cache/
 
 # System files
 .DS_Store
@@ -42,8 +17,21 @@ fetchers/krx_cache/
 .Spotlight-V100
 .Trashes
 
-# Description files
-.windsurf/
-contest-checklists.md
-contest-weekly-scheme.md
-FAQ.md
+# Cache files
+docs_cache/
+fetchers/krx_cache/
+
+# Data folders and files
+backup/
+cache/
+etc/
+output/
+
+# init files
+__init__.py
+fetchers/__init__.py
+utils/__init__.py
+
+# Python files (untracked)
+db_checker.py
+fft.py
