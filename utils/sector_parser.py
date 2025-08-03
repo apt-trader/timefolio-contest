@@ -12,15 +12,15 @@ def parse_sector_limits_for_date(
 ) -> Dict[str, float]:
     """
     Parses the market_sectors.csv file, which has a custom format with date headers,
-    to find the most recent sector weights for a specific date. It then calculates
-    the corresponding portfolio limits based on Timefolio rules: limit = max(2 * market_weight, 10%).
+    to find the most recent sector weights for a specific date. It uses the sector weights
+    directly as portfolio limits (no calculation applied).
 
     Args:
         file_path (str): The path to the market_sectors.csv file.
         target_date (datetime): The date to find the latest limits for.
 
     Returns:
-        A dictionary mapping sector codes to their calculated max weight limit.
+        A dictionary mapping sector codes to their direct weight limits from the CSV.
     """
     default_limits = {
         'En': 0.10, 'Ma': 0.10, 'In': 0.10, 'He': 0.10,
@@ -90,7 +90,8 @@ def parse_sector_limits_for_date(
     most_recent_date = valid_dates.max()
     latest_weights = df[df['date'] == most_recent_date].set_index('sector')['weight']
 
-    sector_limits = {sector: max(2 * (weight / 100.0), 0.10) for sector, weight in latest_weights.items()}
+    # Use sector weights directly as limits (convert from percentage to decimal)
+    sector_limits = {sector: weight / 100.0 for sector, weight in latest_weights.items()}
 
     for sector in default_limits:
         if sector not in sector_limits:
