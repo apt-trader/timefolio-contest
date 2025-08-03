@@ -168,8 +168,18 @@ class PortfolioOptimizer:
                     top_weights = raw_weights.nlargest(self.max_positions)
                     if not top_weights.empty and top_weights.sum() > 0:
                         final_weights = top_weights / top_weights.sum()
-                        logger.info(f"Successfully optimized portfolio with {len(final_weights)} assets.")
-                        return final_weights
+                        
+                        # Filter out tiny weights (numerical precision artifacts)
+                        weight_threshold = 1e-6  # Weights below 0.0001% are set to 0
+                        final_weights = final_weights[final_weights >= weight_threshold]
+                        
+                        # Re-normalize after filtering tiny weights
+                        if not final_weights.empty and final_weights.sum() > 0:
+                            final_weights = final_weights / final_weights.sum()
+                            logger.info(f"Successfully optimized portfolio with {len(final_weights)} assets (after filtering tiny weights).")
+                            return final_weights
+                        else:
+                            logger.warning("All weights were below threshold after filtering.")
                 
                 logger.warning(f"Continuous QP optimization failed or returned empty weights. Status: {problem.status}")
 
