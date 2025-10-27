@@ -434,6 +434,22 @@ class FactorEngine:
         # As a final fallback, fill any remaining NaNs with 0. This can happen if a column had only one non-NaN value.
         final_factors = processed_factors.fillna(0)
         
+        # STABLE FACTORS FILTERING: Apply if enabled
+        if hasattr(self.settings, 'get'):
+            use_stable_only = self.settings.get('use_stable_factors_only', False)
+            stable_list = self.settings.get('stable_factors', [])
+        else:
+            use_stable_only = getattr(self.settings, 'use_stable_factors_only', False)
+            stable_list = getattr(self.settings, 'stable_factors', [])
+        
+        if use_stable_only and stable_list:
+            available_stable = [f for f in stable_list if f in final_factors.columns]
+            if available_stable:
+                final_factors = final_factors[available_stable]
+                logger.info(f"Filtered to {len(available_stable)} stable factors for {date.date()}")
+            else:
+                logger.warning(f"Stable factor filtering requested but none available. Using all factors.")
+        
         logger.info(f"Successfully calculated {final_factors.shape[1]} factors for {final_factors.shape[0]} tickers on {date.date()}.")
         return final_factors
 
