@@ -19,7 +19,7 @@ from scipy import stats
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
-from typing import Optional
+from typing import Optional, List
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -48,6 +48,18 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("TimeFolioPipeline")
+
+def filter_to_stable_factors(factors: pd.DataFrame, stable_factor_list: List[str]) -> pd.DataFrame:
+    """Filter factors to only include stable ones based on rolling window analysis."""
+    available_stable = [f for f in stable_factor_list if f in factors.columns]
+    
+    if not available_stable:
+        logger.warning(f"No stable factors found in data. Requested: {stable_factor_list}, Available: {factors.columns.tolist()}")
+        return factors
+    
+    filtered = factors[available_stable].copy()
+    logger.info(f"Filtered to {len(filtered.columns)} stable factors: {available_stable}")
+    return filtered
 
 def get_fundamentals_at_date(historical_fundamentals: dict, as_of_date: pd.Timestamp) -> pd.DataFrame:
     """Extracts the latest available fundamentals for each ticker as of a given date."""
@@ -258,6 +270,13 @@ def prepare_training_data(cfg: Config, dm: DataManager, factor_engine: FactorEng
             factors.index.name = 'ticker'
             all_factors_list.append(factors.reset_index())
 
+            # STABLE FACTORS FILTERING: Apply if enabled in config
+            if cfg.factor_settings.get('use_stable_factors_only', False):
+                stable_list = cfg.factor_settings.get('stable_factors', [])
+                if stable_list:
+                    factors = filter_to_stable_factors(factors, stable_list)
+                    logger.debug(f"Applied stable factor filtering for {date}: {len(factors.columns)} factors retained")
+    
     if not all_factors_list:
         logger.error("Could not generate any factor data for training. Aborting.")
         return None
