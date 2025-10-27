@@ -100,21 +100,16 @@ class DataManager:
             # Drop any completely empty columns (from trailing commas)
             sector_df = sector_df.dropna(axis=1, how='all')
 
-            # Fix the CSV structure: the first column is sector codes, second is stock codes
-            # Reset index to make sector codes a regular column
-            sector_df = sector_df.reset_index()
-            
-            # Correct column mapping based on actual CSV structure
+            # Correct column mapping for CSV structure: 섹터코드,섹터명,종목코드,종목명
             sector_df.rename(columns={
-                'index': 'sector_code',          # CD, IT, etc. (was index)
-                '섹터코드': 'code',              # A000040, etc. (was 섹터코드)
-                '종목코드': 'company_name'       # KR모터스, etc. (was 종목코드)
+                '섹터코드': 'sector_code',    # En, Ma, IT, etc.
+                '종목코드': 'code'             # Stock codes like 000440
             }, inplace=True)
-        
-            # Clean the ticker code by removing the leading 'A' prefix only
-            if 'code' in sector_df.columns:
-                sector_df['code'] = sector_df['code'].str.replace('^A', '', regex=True)
-            else:
+            
+            # Keep only the columns we need
+            sector_df = sector_df[['sector_code', 'code']]
+            
+            if 'code' not in sector_df.columns:
                 logger.error(f"'code' column not found. Available columns: {sector_df.columns.tolist()}")
 
             # Since we have direct stock code mapping, merge on stock codes
