@@ -1,25 +1,22 @@
 # config/config.yaml
 # --- Data and Date Settings ---
 data_settings:
-  # Paths are relative to the project root (timefolio-2025-main/)
+  # Paths are relative to the project root (timefolio-contest/)
   stock_universe_file: "sector_universe.csv"
   market_sectors_file: "market_sectors.csv"
-  db_path: "db/krx_data.db"
+  db_path: "db/krx_data.db"  # Using absolute path from project root
   
   # Global date range for backtesting and analysis.
-  # Focus on 2023-2024 period - excludes COVID anomalous period (2020-2022)
-  # End date set to Friday for weekend data fetching and Monday submissions
-  start_date: '2023-01-01'
-  end_date: '2025-06-30'  # Friday - aligned with weekend data fetching schedule 
+  # Extended to 2024 for momentum factor calculation (252-day lookback)
+  # Training still focuses on 2025 pure bull regime
+  start_date: '2020-01-01'
+  end_date: '2024-12-31'
 
 # --- Model Training Settings ---
 training_settings:
-  # Focus on 2023-2024: Higher interest rates, inflation concerns, selective market
-  # Excludes COVID era (2020-2022) to avoid learning wrong lessons from anomalous period
-  # This period represents current market reality most relevant for contest
-  start_date: '2023-01-01'
-  end_date: '2025-06-30'  # Friday - aligned with weekend data fetching schedule  
-  rebalance_frequency: 'M'      # Frequency for recalculating factors during training (M=Month-end)
+  start_date: '2025-01-01'
+  end_date: '2025-10-26'
+  rebalance_frequency: '2W'      # Frequency for recalculating factors during training (M=Month-end)
   forward_return_period: 21     # Horizon for forward returns used as prediction target (in trading days)
 
 # --- Portfolio Optimization Parameters ---
@@ -44,7 +41,7 @@ risk_management:
   min_avg_daily_value: 3000000000      # Min avg 5-day trading value (in KRW) to ensure liquidity.
   min_ipo_days: 90                     # Stock must be listed for at least 90 days.
   small_cap_threshold: 1000000000000   # 1 Trillion KRW. Stocks below this are 'small-cap'.
-  max_small_cap_weight: 0.50           # Max total portfolio weight allocated to small-cap stocks.
+  max_small_cap_weight: 0.40           # Max total portfolio weight allocated to small-cap stocks.
 
 # --- Alpha Factor Calculation Settings ---
 factor_settings:
@@ -78,3 +75,7 @@ factor_settings:
   feature_importance:
     n_top_features: 10                  # Number of top features to log
     importance_method: 'permutation'    # Method: 'permutation' or 'coef'
+  
+  # Stable factor filtering (based on rolling window analysis)
+  use_stable_factors_only: false  # Set to false to use all factors
+  stable_factors: ['Vol_Momentum', 'Momentum', 'Leverage', 'Acceleration', 'Quality_Momentum']
