@@ -10,12 +10,12 @@ data_settings:
   # Extended to 2024 for momentum factor calculation (252-day lookback)
   # Training still focuses on 2025 pure bull regime
   start_date: '2020-01-01'
-  end_date: '2024-12-31'
+  end_date: '2025-12-31'
 
 # --- Model Training Settings ---
 training_settings:
   start_date: '2025-01-01'
-  end_date: '2025-10-26'
+  end_date: '2026-01-01'
   rebalance_frequency: '2W'      # Frequency for recalculating factors during training (M=Month-end)
   forward_return_period: 21     # Horizon for forward returns used as prediction target (in trading days)
 
@@ -23,7 +23,7 @@ training_settings:
 optimization_settings:
   # --- Heuristic & Constraints ---
   # In the first step of the heuristic, we select the top N assets by expected return.
-  max_positions: 12           # Controls the size of the candidate universe passed to the QP solver.
+  max_positions: 15           # Controls the size of the candidate universe passed to the QP solver.
   individual_limit: 0.15      # Max weight for any single stock (enforced in solver).
   sector_limits_path: "market_sectors.csv"  # Path to the file with dynamic sector deviation limits.
 
@@ -79,3 +79,47 @@ factor_settings:
   # Stable factor filtering (based on rolling window analysis)
   use_stable_factors_only: false  # Set to false to use all factors
   stable_factors: ['Vol_Momentum', 'Momentum', 'Leverage', 'Acceleration', 'Quality_Momentum']
+
+# --- Signal-Based Pipeline Settings (NEW) ---
+signal_settings:
+  # Signal construction
+  winsorize_limits: [0.02, 0.98]    # Quantile limits for outlier treatment
+  momentum_lookback: 252            # 12-month momentum lookback
+  momentum_skip: 21                 # Skip recent month (reversal avoidance)
+  volatility_lookback: 63           # 3-month volatility window
+  min_history_days: 126             # Minimum price history required
+  
+  # Signal optimization (MVO on signals)
+  min_signal_weight: 0.05           # Minimum weight per signal
+  max_signal_weight: 0.50           # Maximum weight per signal
+  signal_turnover_penalty: 0.01     # Penalty for signal weight changes
+  use_shrinkage: true               # Use Ledoit-Wolf shrinkage for covariance
+  expected_return_method: 'shrinkage'  # 'mean', 'ewma', or 'shrinkage'
+  decay_factor: 0.97                # EWMA decay factor
+  min_history_periods: 26           # Minimum weeks for signal return estimation
+  
+  # Portfolio mapping
+  signal_concentration: 0.2         # Top 20% of stocks per signal
+  min_weight_per_stock: 0.02        # Minimum stock weight (below = exclude)
+  n_quantiles: 5                    # Quantiles for signal portfolio formation
+  
+  # Turnover management (OPTIMIZED for transaction costs)
+  max_turnover: 0.15                # Reduced from 0.30 to minimize costs
+  min_trade_size: 0.01              # Minimum trade size
+  
+  # Transaction costs (based on actual contest data)
+  commission_rate: 0.001            # 0.1% commission per trade
+  tax_rate: 0.0023                  # 0.23% securities transaction tax (sells only)
+  use_market_impact: false          # Enable market impact modeling
+  min_trade_threshold: 0.01         # Increased from 0.005 to reduce small trades
+  cost_penalty_weight: 1.0          # Weight for cost penalty in objective
+  
+  # Regime detection and signal adjustment
+  use_regime_adjustment: true       # Enable regime-conditional signal weights
+  regime_trend_window: 63           # ~3 months for trend detection
+  regime_vol_window: 21             # ~1 month for volatility
+  regime_vol_lookback: 252          # 1 year for vol comparison
+  regime_momentum_window: 21        # 1 month momentum
+  regime_adjustment_strength: 0.3   # Reduced from 0.5 for smoother transitions
+  regime_smooth_transitions: true   # Smooth regime transitions
+  regime_transition_speed: 0.3      # Speed of transition (0-1)
