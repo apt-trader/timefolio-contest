@@ -1,6 +1,8 @@
 # requirements.txt
-# Core Dependencies
-numpy>=1.26.0
+# =================
+# Core Dependencies (Required for signal-based system)
+# =================
+numpy<2.0.0
 pandas>=2.1.0
 scipy>=1.11.0
 pyyaml>=6.0.0
@@ -13,38 +15,37 @@ python-dotenv>=1.0.0
 yfinance>=0.2.63
 fredapi>=0.5.2
 pandas-market-calendars>=4.3.2
-OpenDartReader>=0.1.6
+OpenDartReader>=0.2.3
+selenium>=4.39.0
 
 # Database
 sqlalchemy>=2.0.23
 
-# Optimization & Modeling
+# Optimization (Required for signal-based MVO)
 cvxpy>=1.3.2
-cvxopt>=1.3.2
 ecos>=2.0.12
-riskfolio-lib>=4.4.2
 scikit-learn>=1.3.2
-statsmodels>=0.14.0
-optuna>=3.3.0
-# Note: glpk is now installed separately via system package manager
 
 # Visualization
-matplotlib==3.7.2
-seaborn==0.12.2
+matplotlib>=3.7.0
+seaborn>=0.12.0
 
-# Testing & Development
-pytest==7.4.0
-pytest-cov==4.1.0
-types-python-dateutil==2.8.19.14
-types-requests==2.31.0.10
-
-# Jupyter Support
-ipykernel==6.25.2
-jupyter==1.0.0
-
-# Additional Dependencies
+# Additional
 typing-extensions>=4.9.0
 
-# Data Fetchers
-OpenDartReader==0.2.3
-requests-file==2.1.0
+# =================
+# Optional Dependencies (Legacy system / Development)
+# =================
+# Uncomment if using legacy main.py or tuner.py
+# cvxopt>=1.3.2
+# riskfolio-lib>=4.4.2
+# statsmodels>=0.14.0
+# optuna>=3.3.0
+
+# Testing (optional)
+# pytest>=7.4.0
+# pytest-cov>=4.1.0
+
+# Jupyter (optional)
+# ipykernel>=6.25.0
+# jupyter>=1.0.0
