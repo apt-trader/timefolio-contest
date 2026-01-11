@@ -1,258 +1,323 @@
 # TimeFolio Portfolio System
 
-A modular, professional-grade system for building, backtesting, and optimizing compliant Korean equity portfolios. It features a complete, end-to-end quantitative workflow, from data ingestion and multi-factor alpha modeling to hyperparameter tuning and risk analysis.
+A **signal-based portfolio optimization system** for the Korean equity market (KOSPI/KOSDAQ). Implements Mean-Variance Optimization at the signal level rather than individual stocks, achieving higher signal-to-noise ratio and more robust portfolios.
 
 ## Table of Contents
 
 1. [Key Features](#key-features)
 2. [System Architecture](#system-architecture)
-3. [The Quantitative Workflow](#the-quantitative-workflow)
-4. [Prerequisites](#prerequisites)
-5. [Installation](#installation)
-6. [Configuration](#configuration)
-7. [CLI Usage](#cli-usage)
-8. [Technical Framework](#technical-framework)
-9. [Outputs](#outputs)
-10. [License & Acknowledgements](#license--acknowledgements)
+3. [Quick Start](#quick-start)
+4. [Configuration](#configuration)
+5. [CLI Usage](#cli-usage)
+6. [Technical Framework](#technical-framework)
+7. [Backtest Results](#backtest-results)
+8. [Outputs](#outputs)
 
 ---
 
 ## Key Features
 
-- **Robust Data Fetchers**: Modules for KRX (prices), DART (fundamentals), and FRED/yfinance (macro data), with built-in rate limiting and error handling.
-- **Advanced Factor Engine**: Computes a suite of advanced alpha factors (Multi-dimensional Momentum, Robust Value, Deeper Quality, Investment).
-- **INSTITUTIONAL-GRADE ML ENSEMBLE**: Advanced machine learning models including Random Forest, XGBoost, LightGBM, and Neural Networks with stacking meta-model achieving **100x R² improvement** over baseline linear models.
-- **ROBUST REGRESSION SUITE**: Huber, RANSAC, Theil-Sen, and Quantile regression models for outlier-resistant factor modeling with prediction intervals.
-- **ROLLING WINDOW ANALYSIS**: Dynamic factor models across multiple time horizons achieving **31.59% ± 11.17% R²** for short-term models with adaptive factor loading.
-- **REGIME DETECTION**: Sophisticated market regime analysis with Hidden Markov Models for regime-aware portfolio construction and risk management.
-- **ADVANCED VOLATILITY MODELING**: GARCH family models (GARCH, GJR-GARCH, EGARCH) for institutional-grade risk modeling and correlation analysis.
-- **CVXPY-based Optimizer**: Enhanced two-step quadratic programming with SME compliance and advanced constraint handling.
-- **Scientific Backtesting**: Simulates historical strategy performance with key metrics like Sharpe Ratio and Maximum Drawdown.
-- **Automated Tuning**: Uses `Optuna` to discover the optimal strategy hyperparameters automatically.
+### Signal-Based MVO (Core Innovation)
+- **5 Orthogonal Signals**: Value, Quality, Momentum, Low Volatility, Growth
+- **Signal-Level Optimization**: MVO on 5 signals instead of 200+ stocks
+- **Higher SNR**: Signal portfolios have ~10x higher signal-to-noise ratio
+- **Robust Covariance**: Ledoit-Wolf shrinkage for stable estimation
+
+### Transaction Cost Awareness
+- **Korean Market Costs**: 0.1% commission + 0.23% securities transaction tax
+- **Turnover Control**: Max 15% one-way turnover per rebalance
+- **Small Trade Filtering**: Minimum 1% trade threshold
+
+### Regime Detection
+- **Market Regimes**: Bull, Bear, High Volatility, Low Volatility, Neutral
+- **Adaptive Weights**: Signal weights adjust based on detected regime
+- **Smooth Transitions**: Gradual regime shifts to avoid whipsaws
+
+### Compliance & Risk
+- **Forbidden Tickers**: Automatic filtering via `forbidden.csv`
+- **Sector Limits**: Dynamic sector concentration constraints
+- **Liquidity Filters**: Min 3B KRW daily trading value
 
 ---
 
 ## System Architecture
 
-The system is organized into distinct, decoupled modules.
-
 ```
-/timefolio-2025
-├── main.py                     # Main pipeline with institutional-grade integration
-├── ml_ensemble_alpha.py        # Advanced ML models (RF, XGBoost, LightGBM, NN)
-├── robust_regression_models.py # Robust regression ensemble (Huber, RANSAC, Quantile)
-├── rolling_window_models.py    # Rolling window dynamic factor models
-├── regime_detection.py         # Market regime detection and analysis
-├── volatility_models.py        # Advanced volatility modeling (GARCH family)
-├── tuner.py                    # Hyperparameter optimization using Optuna
-├── config.py                   # Centralized configuration handler
-├── data_manager.py             # Data access layer, orchestrates fetchers
-├── factor_engine.py            # Enhanced factor calculation engine
-├── optimizer.py                # Advanced portfolio optimization with constraints
-├── risk_monitor.py             # Institutional-grade risk analysis and reporting
-|
-├── fetchers/                   # Modules for fetching external data.
-│   ├── __init__.py
+/timefolio-contest
+├── main_signal.py              # ★ NEW ENTRY POINT
+├── signals/                    # ★ NEW SIGNAL-BASED MODULES
+│   ├── signal_constructor.py   # Builds 5 orthogonal signals
+│   ├── signal_optimizer.py     # Signal-level MVO
+│   ├── portfolio_mapper.py     # Maps signals to stock weights
+│   ├── signal_pipeline.py      # End-to-end orchestration
+│   ├── transaction_costs.py    # Transaction cost model
+│   └── regime_signal_weights.py # Regime detection & adjustment
+│
+├── config.py                   # Configuration loader
+├── data_manager.py             # Data access layer
+├── compliance_filters.py       # Forbidden ticker filtering
+│
+├── fetchers/                   # Data fetching modules
 │   ├── krx_fetcher.py          # Market data (OHLCV, Market Cap)
 │   ├── financial_fetcher.py    # Fundamental data (DART)
-│   └── macro_fetcher.py        # Macroeconomic data (FRED, yfinance)
-|
+│   └── macro_fetcher.py        # Macroeconomic data
+│
 ├── config/
-│   └── config.yaml             # Central configuration file.
-|
-└── krx_data.db                 # Central SQLite Database
+│   └── config.yaml             # Central configuration
+│
+├── db/
+│   └── krx_data.db             # SQLite database
+│
+├── forbidden.csv               # Excluded tickers
+├── sector_universe.csv         # Stock universe
+└── market_sectors.csv          # Sector definitions
+```
+
+### Legacy Files (Preserved but Unused)
+```
+legacy/                         # Old stock-level MVO system
+├── main.py                     # Old entry point
+├── factor_engine.py            # Old factor model
+├── optimizer.py                # Old stock-level optimizer
+├── ml_ensemble_alpha.py        # ML ensemble (disabled)
+├── robust_regression_models.py # Robust regression (disabled)
+└── ...                         # Other legacy modules
 ```
 
 ---
 
-## The Quantitative Workflow
+## Quick Start
 
-The project follows a professional quantitative research and production lifecycle:
+### Prerequisites
+- Python 3.9+
+- SQLite 3
+- API keys for DART and FRED (in `.env` file)
 
-1. **Data Population:** Use the standalone `fetchers` to populate a local SQLite database with market, fundamental, and macro data. This is done once or periodically to keep the local data store fresh.
-2. **Strategy Research & Tuning:** Use `tuner.py` to run dozens or hundreds of backtests, automatically finding the optimal parameters (e.g., factor windows, risk aversion) that maximize historical performance.
-3. **Validation:** Update `config.yaml` with the best parameters found by the tuner for live trading deployment.
-4. **Production Run:** Execute `main.py` to generate the final portfolio for the upcoming period using the validated, optimal configuration.
-
----
-
-## Prerequisites
-
-- Python 3.9+ & SQLite 3
-- API keys for DART and FRED.
-
----
-
-## Installation
+### Installation
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/your-org/timefolio-2025.git
-cd timefolio-2025
+# Clone and setup
+git clone https://github.com/your-org/timefolio-contest.git
+cd timefolio-contest
 
-# 2. Create and activate a virtual environment
+# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate
 
-# 3. Create a .env file for your API keys (in the project root)
-cp .env.example .env
-# -> Now, edit the .env file with your DART_API_KEY and FRED_API_KEY
-
-# 4. Install all dependencies from the corrected requirements file
+# Install dependencies
 pip install -r requirements.txt
+
+# Setup API keys
+cp .env.example .env
+# Edit .env with your DART_API_KEY and FRED_API_KEY
+```
+
+### Generate Portfolio (Production)
+
+```bash
+# Generate live portfolio for this week
+python main_signal.py --mode live
+```
+
+### Run Backtest
+
+```bash
+# Backtest 2024 performance
+python main_signal.py --mode backtest --start 2024-01-01 --end 2024-12-31
 ```
 
 ---
 
 ## Configuration
 
-All system parameters are managed in `config/config.yaml`. This centralized approach allows for easy tuning and experimentation.
+### Date Ranges in `config.yaml`
+
+There are **two separate date ranges** with different purposes:
 
 ```yaml
-# config/config.yaml
 data_settings:
-  # Paths are relative to the project root
-  stock_universe_file: "sector_universe.csv"
-  market_sectors_file: "market_sectors.csv"
-  db_path: "db/krx_data.db"
+  start_date: '2020-01-01'   # Data loading range (need 2+ years for warmup)
+  end_date: '2025-12-31'     # Latest available data
+
+training_settings:           # LEGACY - only used by old main.py
+  start_date: '2025-01-01'   # Not used by main_signal.py
+  end_date: '2026-01-01'
+```
+
+| Setting | Purpose | Used By |
+|---------|---------|---------|
+| `data_settings.start_date` | How far back to load data (momentum needs 252 days, warmup needs 52 weeks) | `main_signal.py` |
+| `data_settings.end_date` | Latest data to load | `main_signal.py` |
+| `training_settings.*` | Legacy model training period | Old `main.py` only |
+
+**Rule**: Set `data_settings.start_date` to at least 2 years before your backtest start date.
+
+### Signal Pipeline Settings
+
+```yaml
+signal_settings:
+  # Core optimization
+  max_positions: 15
+  risk_aversion: 0.27
+  
+  # Turnover control (OPTIMIZED)
+  max_turnover: 0.15              # 15% max one-way turnover
+  min_trade_threshold: 0.01       # 1% minimum trade size
+  
+  # Transaction costs
+  commission_rate: 0.001          # 0.1%
+  tax_rate: 0.0023                # 0.23% (sells only)
+  
+  # Regime detection
+  use_regime_adjustment: true
+  regime_adjustment_strength: 0.3
 ```
 
 ---
 
 ## CLI Usage
 
-### **Step 1: Populate Your Database (Run once, then periodically)**
-
-Run these scripts from the project root to download data into `krx_data.db`. It's recommended to fetch data for one year at a time to respect API limits.
+### Step 1: Update Database
 
 ```bash
-# Note: The -m flag is crucial for running scripts inside a package.
+# Fetch latest market data
+python fetchers/krx_fetcher.py -s 20250101 -e 20250111 --update-db
 
-# 1. Fetch market data from KRX
-python fetchers/krx_fetcher.py -s 20250601 -e 20250630 --update-db
+# Fetch macroeconomic data
+python -m fetchers.macro_fetcher -s 2025-01-01 -e 2025-01-11
 
-# 2. Fetch macroeconomic data
-python -m fetchers.macro_fetcher -s 2025-06-01 -e 2025-06-30
-
-# 3. Fetch annual financial statements from DART for all universe stocks
-python main.py --fetch-financials --year 2025 --report-type 11011(annual), 11012(Q2), 11013(Q1), 11014(Q3)
+# Fetch financial statements
+python main.py --fetch-financials --year 2024 --report-type 11011
 ```
 
-### **Step 2: Find Optimal Parameters (Research Phase)**
-
-**Strategic Focus**: Train on 2023-2024 period (current market regime) while excluding the anomalous COVID era (2020-2022).
-
-**Objectives (in order of priority)**:
-1. **Sharpe Ratio Optimization**: Target 1.0+ for contest competitiveness
-2. **Risk-Adjusted Returns**: Achieve 25-35% annualized returns with controlled volatility
-3. **Drawdown Management**: Keep maximum drawdown under 15% for capital preservation
-4. **Factor Balance**: Learn from realistic market conditions with proper Value/Momentum/Quality rotations
-5. **Parameter Robustness**: Avoid overfitting to unrepeatable market anomalies
-
-**Time Estimation**: 2-4 hours with parallelization, 7-10 hours single-threaded (300 trials).
+### Step 2: Update Compliance Files
 
 ```bash
-# Full hyperparameter tuning on strategic period
-python tuner.py --start-date 2023-01-01 --end-date 2024-12-27 --n-trials 300 \
- --study-name "final-model-tuning-v1" --n-jobs 4
+# Edit forbidden.csv - add tickers with caution/warning status
+# Edit market_sectors.csv - update sector limits if needed
 ```
 
-```bash
-# Test optimized parameters on full strategic period
-python test_improvement.py
-```
-
-After the run, copy the "Best Parameters" from the output into your `config.yaml`.
-
-### **Step 3: Market Cycle Analysis (Research Tool)**
-
-Use the advanced FFT analysis tool to understand cyclical patterns in market data, validate strategy parameters, and gain deeper insights into individual stock behaviors.
-
-**Key Use Cases:**
-- **Stock Research**: Deep-dive into individual stock cyclical patterns
-- **Parameter Validation**: Confirm that optimized parameters align with market rhythms
+### Step 3: Generate Portfolio
 
 ```bash
-# Analyze Samsung Electronics cyclical patterns
-python fft.py 005930 -s 2023-01-01 -e 2024-06-01
-```
+# Live mode - generates portfolio for current week
+python main_signal.py --mode live
 
-**Analyzing the FFT Results**:
-
-The generated PNG contains three key analysis panels:
-
-**Panel 1: Original vs Detrended Data**
-- **Blue line**: Original price series
-- **Orange line**: Detrended series (linear trend removed)
-- **Purpose**: Shows cyclical patterns without trend interference
-
-**Panel 2: FFT Spectrum (Key Analysis)**
-- **X-axis**: Period (in days) - identifies cycle lengths
-- **Y-axis**: Magnitude (strength of each cycle)
-- **Green dashed lines**: Dominant cycles (e.g., 30-day, 102-day)
-- **Purpose**: Reveals the strongest cyclical patterns in the data
-
-**Panel 3: Signal Reconstruction**
-- **Blue line**: Original price series
-- **Orange line**: Reconstructed using only dominant cycles
-- **Purpose**: Validates that identified cycles capture real market patterns
-
-**Strategic Validation**: Compare identified cycles (e.g., 30-day dominant cycle) with your optimized momentum window (e.g., 48 days) to confirm your strategy captures genuine market rhythms rather than noise.
-
-
-### **Step 4: Generate Final Portfolio (Production Run)**
-
-Execute the main pipeline to generate the portfolio for the upcoming period.
-
-```bash
-python main.py --output-dir output/
+# Backtest mode - test historical performance
+python main_signal.py --mode backtest --start 2024-01-01 --end 2024-06-30
 ```
 
 ---
 
 ## Technical Framework
 
-- **Alpha Model**: A machine-learning-driven multi-factor model.
-  - **Factor Library**: The factor model is built on a comprehensive set of individual factors, grouped into five core families. This granular approach allows for more precise risk and return attribution.
-    - **Value**: Book-to-Price (B/P), Earnings-to-Price (E/P), Sales-to-Price (S/P), and Cash-Flow-to-Price (CF/P).
-    - **Quality**: Return-on-Equity (ROE), Financial Leverage, and ROE Stability.
-    - **Profitability**: Gross Profitability (GPA), Operating Margin, and Net Margin.
-    - **Momentum**: 12-Month Momentum, 6-Month Acceleration, and Volatility-Scaled Momentum.
-    - **Investment**: Total Asset Growth and CAPEX Growth.
-  - **Signal Generation**: All factors are individually winsorized and standardized to ensure robustness. The final alpha score is generated using a Principal Component Regression (PCR) model, which creates a diversified signal from these inputs. This approach reduces noise and captures the most significant drivers of alpha. The final signal is dynamically tilted based on a macro regime indicator (the 10y-2y yield spread).
-- **Portfolio Construction**: A two-step Mean-Variance Optimization (MVO) process.
-  - **Step 1 (Pre-selection)**: A candidate universe of high-potential assets is selected based on expected returns to reduce the problem size and control the number of positions.
-  - **Step 2 (Optimization)**: A continuous Quadratic Programming (QP) solver (OSQP) finds the optimal weights for the selected assets.
-  - `Objective: max  μ'w - λ·w'Σw`
-- **Constraints & Heuristics**:
-  - **Full Investment**: `Σw = 1` (enforced in solver).
-  - **Weight Limits**: `w_i ≤ max_weight` (e.g., 0.15, enforced in solver).
-  - **Sector Exposure**: Dynamic deviation limits relative to a market benchmark (enforced in solver).
-  - **Turnover**: Limits on portfolio rebalancing to control transaction costs.
-- **Risk Management**: Post-optimization analysis via `RiskMonitor` checks HHI for weight and return concentration, MDD, and weekly turnover to ensure compliance.
+### Signal Construction
+
+| Signal | Components | Description |
+|--------|------------|-------------|
+| **Value** | B/P, E/P, S/P, C/P | Composite value score |
+| **Quality** | ROE, Low Leverage, Earnings Quality | Fundamental quality |
+| **Momentum** | 12-1 month return | Price momentum (skip recent month) |
+| **Low Volatility** | Inverse realized volatility | Defensive signal |
+| **Growth** | Revenue/Earnings growth (or ROE proxy) | Growth characteristics |
+
+### Signal-Level MVO
+
+```
+Objective: max  μ'w - λ·w'Σw
+
+Where:
+  μ = Expected signal returns (shrinkage estimator)
+  Σ = Signal covariance (Ledoit-Wolf shrinkage)
+  λ = Risk aversion (default: 0.27)
+  w = Signal weights (sum to 1, each ≥ 0)
+```
+
+### Portfolio Mapping
+
+1. **Compute composite score**: `score_i = Σ(signal_weight_j × signal_score_ij)`
+2. **Select top stocks**: Top 15 by composite score
+3. **Apply constraints**: Max 15% per stock, sector limits
+4. **Filter forbidden**: Remove tickers in `forbidden.csv`
+
+### Regime Detection
+
+| Regime | Momentum | LowVol | Value | Quality |
+|--------|----------|--------|-------|---------|
+| Bull | +30% | -30% | -20% | -10% |
+| Bear | -40% | +40% | +20% | +30% |
+| High Vol | -50% | +50% | 0% | +20% |
+| Low Vol | +10% | -10% | 0% | 0% |
+
+---
+
+## Pipeline Flow
+
+### 1. Signal Construction (`SignalConstructor`)
+- Calculates 5 orthogonal signals from raw data
+- Applies winsorization and robust standardization
+- Outputs z-scores for each stock per signal
+
+### 2. Signal Return Estimation (`SignalReturnEstimator`)
+- Forms long-only portfolios for each signal (top quintile)
+- Tracks historical signal portfolio returns
+- Requires ~26 weeks warmup for reliable estimation
+
+### 3. Signal Optimization (`SignalOptimizer`)
+- Estimates signal expected returns (with shrinkage)
+- Estimates signal covariance (Ledoit-Wolf)
+- Performs MVO on 5x5 covariance matrix
+- Outputs optimal signal weights
+
+### 4. Portfolio Mapping (`PortfolioMapper`)
+- Calculates composite score per stock
+- Selects top stocks by composite score
+- Applies cardinality constraint (max 15)
+- Applies sector constraints
+
+### 5. Turnover Management (`TurnoverManager`)
+- Limits one-way turnover to 15%
+- Smooths transitions between rebalances
+
+---
+
+## Backtest Results
+
+### 2024 H1 Performance
+
+| Phase | Total Return | Ann. Return | Volatility | Sharpe | Costs |
+|-------|--------------|-------------|------------|--------|-------|
+| Phase 1 (Signal MVO) | +5.16% | +11.02% | 9.82% | **1.12** | N/A |
+| Phase 2 (+ Costs & Regime) | +5.07% | +10.84% | 9.95% | **1.09** | 149.5 bps |
+
+### Comparison with Old System
+
+| Aspect | Old System | New System |
+|--------|-----------|------------|
+| Optimization level | Stock (200+) | Signal (5) |
+| Covariance matrix | 200x200 (unstable) | 5x5 (stable) |
+| SNR | ~0.05 | ~0.5-1.0 |
+| Model complexity | ML ensemble | Simple MVO |
+| Interpretability | Low | High |
+| Turnover | Uncontrolled | Managed |
 
 ---
 
 ## Outputs
 
-All outputs are saved to the directory specified by `--output-dir` (default: `output/`), unless otherwise noted.
+### From `main_signal.py --mode live`
+- `output/portfolio_YYYYMMDD.csv` - Final portfolio weights
 
-### From `main.py` (Production Run)
-- **Final Portfolio**: `final_portfolio.csv`
-- **Risk Report**: `risk_report_{timestamp}.txt`
-
-
-- **Performance Summary**: `backtest_summary.txt`
-- **Equity Curve Plot**: `backtest_equity_curve.png`
-- **Daily Returns Series**: `backtest_returns.csv`
-
-### From `tuner.py` (Tuning Run)
-- **Tuning Database**: `tuning_results.db` (saved in the project root)
+### From `main_signal.py --mode backtest`
+- Console output with performance metrics
+- Log file in `logs/`
 
 ---
 
-## License & Acknowledgements
+## License
 
-- **License**: MIT
-- **Libraries**: Optuna, CVXPY, Pandas, NumPy, Scikit-learn, XGBoost, PyYAML, yfinance, fredapi, pandas-market-calendars, OpenDartReader-unofficial
-- **Data Sources**: Korea Exchange (KRX), DART, FRED Economic Data
+MIT License
+
+**Libraries**: CVXPY, Pandas, NumPy, Scikit-learn, PyYAML, yfinance, fredapi, OpenDartReader
+
+**Data Sources**: Korea Exchange (KRX), DART, FRED
