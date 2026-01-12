@@ -10,7 +10,7 @@ data_settings:
   # Extended to 2024 for momentum factor calculation (252-day lookback)
   # Training still focuses on 2025 pure bull regime
   start_date: '2020-01-01'
-  end_date: '2025-12-31'
+  end_date: '2026-01-01'
 
 # --- Model Training Settings ---
 training_settings:
@@ -102,7 +102,9 @@ signal_settings:
   signal_concentration: 0.2         # Top 20% of stocks per signal
   min_weight_per_stock: 0.02        # Minimum stock weight (below = exclude)
   n_quantiles: 5                    # Quantiles for signal portfolio formation
-  
+  min_market_cap: 100000000000      # Minimum market cap: 100 billion KRW (1000억원)
+  min_avg_trading_value: 3000000000 # Minimum 5-day avg trading value: 3 billion KRW (30억원)
+
   # Turnover management (OPTIMIZED for transaction costs)
   max_turnover: 0.15                # Reduced from 0.30 to minimize costs
   min_trade_size: 0.01              # Minimum trade size
