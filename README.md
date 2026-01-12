@@ -36,7 +36,8 @@ A **signal-based portfolio optimization system** for the Korean equity market (K
 ### Compliance & Risk
 - **Forbidden Tickers**: Automatic filtering via `forbidden.csv`
 - **Sector Limits**: Dynamic sector concentration constraints
-- **Liquidity Filters**: Min 3B KRW daily trading value
+- **Market Cap Filter**: Min 100B KRW (시가총액 1,000억원 이상)
+- **Liquidity Filter**: Min 3B KRW 5-day avg trading value (5일 평균 거래대금 30억원 이상)
 
 ---
 
