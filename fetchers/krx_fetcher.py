@@ -32,9 +32,9 @@ try:
     from selenium.webdriver.chrome.options import Options
     from selenium.common.exceptions import TimeoutException, NoSuchElementException
     SELENIUM_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     SELENIUM_AVAILABLE = False
-    logging.warning("Selenium not installed. Install with: pip install selenium")
+    logging.warning(f"Selenium not fully available: {e}. Install with: pip install selenium")
 
 # Configure logging
 logs_dir = Path(__file__).parent.parent / 'logs'
@@ -276,6 +276,16 @@ class KRXDataFetcher:
             
             # Extract cookies from Selenium and add to requests session
             logger.info("Extracting cookies from browser...")
+            selenium_cookies = driver.get_cookies()
+            for cookie in selenium_cookies:
+                self.session.cookies.set(cookie['name'], cookie['value'], domain=cookie.get('domain'))
+            
+            # Also try to visit the data page to ensure we have all necessary cookies
+            logger.info("Visiting data page to initialize session...")
+            driver.get("https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd?menuId=MDC0201")
+            time.sleep(3)
+            
+            # Re-extract cookies after visiting data page
             selenium_cookies = driver.get_cookies()
             for cookie in selenium_cookies:
                 self.session.cookies.set(cookie['name'], cookie['value'], domain=cookie.get('domain'))
