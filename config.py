@@ -59,6 +59,9 @@ class Config:
         # --- Training Settings ---
         self.training_settings: Dict[str, Any] = self._raw_config.get('training_settings', {})
         
+        # --- Signal Pipeline Settings ---
+        self.signal_settings: Dict[str, Any] = self._raw_config.get('signal_settings', {})
+        
         # --- Data Fetcher Settings (Enriched with API Keys) ---
         self.fetcher_settings: Dict[str, Any] = {}
         self.fetcher_settings['dart_api_key'] = os.getenv('DART_API_KEY')
