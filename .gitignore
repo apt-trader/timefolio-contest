@@ -18,20 +18,18 @@ __pycache__/
 .Trashes
 
 # Cache files
-docs_cache/
-fetchers/krx_cache/
-
-# Data folders and files
-backup/
 cache/
-etc/
-output/
 
 # init files
 __init__.py
 fetchers/__init__.py
 utils/__init__.py
 
-# Python files (untracked)
-db_checker.py
-fft.py
+# Data folders
+backup/
+etc/
+db/
+logs/
+legacy
+timefolio-ideas
+contest-weekly-scheme.md
