@@ -193,7 +193,9 @@ class SignalPipeline:
         fundamentals: pd.DataFrame,
         sector_map: Dict[str, str],
         rebalance_date: pd.Timestamp,
-        warmup_mode: bool = False
+        warmup_mode: bool = False,
+        forbidden_tickers: Optional[set] = None,
+        trading_values: Optional[pd.DataFrame] = None
     ) -> Dict[str, Any]:
         """
         Run the full signal pipeline for a rebalance date.
@@ -206,6 +208,8 @@ class SignalPipeline:
             sector_map: Dict of ticker -> sector
             rebalance_date: Date for rebalancing
             warmup_mode: If True, only build signals without optimization (for history)
+            forbidden_tickers: Set of tickers to exclude from portfolio selection
+            trading_values: Trading value DataFrame (date x ticker) for liquidity filter
             
         Returns:
             Dict with:
@@ -303,15 +307,58 @@ class SignalPipeline:
         # Step 4: Map to stock weights
         logger.info("Step 4: Mapping signals to stock weights...")
         
-        # Get market caps at rebalance date
+        # Get market caps at rebalance date (use most recent valid data if holiday)
         if rebalance_date in market_caps.index:
             market_caps_at_date = market_caps.loc[rebalance_date]
+            # Check if this date has mostly missing data (holiday)
+            if (market_caps_at_date > 0).sum() < 100:
+                # Find most recent date with valid data
+                for i in range(1, min(10, len(market_caps))):
+                    prev_date = market_caps.index[-(i+1)] if rebalance_date == market_caps.index[-1] else market_caps.index[market_caps.index.get_loc(rebalance_date) - i]
+                    prev_caps = market_caps.loc[prev_date]
+                    if (prev_caps > 0).sum() >= 100:
+                        logger.info(f"Using market caps from {prev_date.strftime('%Y-%m-%d')} (rebalance date has incomplete data)")
+                        market_caps_at_date = prev_caps
+                        break
         else:
             market_caps_at_date = market_caps.iloc[-1]
         
+        # Filter forbidden tickers from signals BEFORE portfolio mapping
+        signals_filtered = signals.copy()
+        if forbidden_tickers:
+            forbidden_in_signals = [t for t in signals_filtered.index if t in forbidden_tickers]
+            if forbidden_in_signals:
+                logger.info(f"Excluding {len(forbidden_in_signals)} forbidden tickers from selection")
+                signals_filtered = signals_filtered.drop(forbidden_in_signals, errors='ignore')
+        
+        # Filter stocks with market cap below minimum threshold (100 billion KRW)
+        min_market_cap = self.config.get('min_market_cap', 100_000_000_000)  # 100B KRW default
+        if min_market_cap > 0:
+            valid_caps = market_caps_at_date[market_caps_at_date >= min_market_cap]
+            small_cap_tickers = [t for t in signals_filtered.index if t not in valid_caps.index]
+            if small_cap_tickers:
+                logger.info(f"Excluding {len(small_cap_tickers)} stocks with market cap < {min_market_cap/1e9:.0f}B KRW")
+                signals_filtered = signals_filtered.drop(small_cap_tickers, errors='ignore')
+        
+        # Filter stocks with 5-day average trading value below threshold (3 billion KRW)
+        min_trading_value = self.config.get('min_avg_trading_value', 3_000_000_000)  # 3B KRW default
+        if min_trading_value > 0 and trading_values is not None and not trading_values.empty:
+            # Calculate 5-day average trading value (using last 5 TRADING days, not calendar days)
+            # Filter out days with mostly zero values (holidays)
+            trading_data = trading_values.loc[:rebalance_date]
+            valid_trading_days = trading_data[(trading_data > 0).sum(axis=1) >= 100]  # Days with at least 100 stocks traded
+            recent_values = valid_trading_days.tail(5)
+            if len(recent_values) > 0:
+                avg_5d_value = recent_values.mean()
+                valid_liquidity = avg_5d_value[avg_5d_value >= min_trading_value]
+                illiquid_tickers = [t for t in signals_filtered.index if t not in valid_liquidity.index]
+                if illiquid_tickers:
+                    logger.info(f"Excluding {len(illiquid_tickers)} stocks with 5-day avg trading value < {min_trading_value/1e9:.0f}B KRW")
+                    signals_filtered = signals_filtered.drop(illiquid_tickers, errors='ignore')
+        
         stock_weights = self.portfolio_mapper.map_signals_to_stocks(
             signal_weights=signal_weights,
-            signal_scores=signals,
+            signal_scores=signals_filtered,
             sector_map=sector_map,
             market_caps=market_caps_at_date
         )
@@ -528,37 +575,58 @@ def create_pipeline_from_config(cfg) -> SignalPipeline:
     opt_settings = cfg.optimization_settings
     risk_mgmt = cfg.risk_management
     factor_settings = cfg.factor_settings
+    signal_settings = getattr(cfg, 'signal_settings', {}) or {}
     
     config = {
         # From optimization settings
-        'max_positions': opt_settings.get('max_positions', 15),
-        'max_weight_per_stock': opt_settings.get('individual_limit', 0.15),
-        'risk_aversion': opt_settings.get('risk_aversion', 1.0),
-        'sector_max_weight': opt_settings.get('sector_limit', 0.40),
+        'max_positions': signal_settings.get('max_positions', opt_settings.get('max_positions', 15)),
+        'max_weight_per_stock': signal_settings.get('max_weight_per_stock', opt_settings.get('individual_limit', 0.15)),
+        'risk_aversion': signal_settings.get('risk_aversion', opt_settings.get('risk_aversion', 1.0)),
+        'sector_max_weight': signal_settings.get('sector_max_weight', opt_settings.get('sector_limit', 0.40)),
         
-        # From risk management
-        'max_turnover': risk_mgmt.get('turnover_limit', 0.30),
+        # From signal settings (with fallbacks)
+        'max_turnover': signal_settings.get('max_turnover', risk_mgmt.get('turnover_limit', 0.30)),
+        'momentum_lookback': signal_settings.get('momentum_lookback', 252),
+        'momentum_skip': signal_settings.get('momentum_skip', 21),
+        'volatility_lookback': signal_settings.get('volatility_lookback', 63),
+        'min_history_days': signal_settings.get('min_history_days', 126),
         
-        # From factor settings
-        'momentum_lookback': factor_settings.get('mom_windows', [252])[-1] if factor_settings.get('mom_windows') else 252,
+        # Signal optimization
+        'min_signal_weight': signal_settings.get('min_signal_weight', 0.05),
+        'max_signal_weight': signal_settings.get('max_signal_weight', 0.50),
+        'signal_turnover_penalty': signal_settings.get('signal_turnover_penalty', 0.01),
+        'use_shrinkage': signal_settings.get('use_shrinkage', True),
+        'expected_return_method': signal_settings.get('expected_return_method', 'shrinkage'),
+        'decay_factor': signal_settings.get('decay_factor', 0.97),
+        'min_history_periods': signal_settings.get('min_history_periods', 26),
         
-        # Defaults for new parameters
-        'min_signal_weight': 0.05,
-        'max_signal_weight': 0.50,
-        'signal_turnover_penalty': 0.01,
-        'use_shrinkage': True,
-        'min_weight_per_stock': 0.02,
-        'signal_concentration': 0.2,
-        'min_trade_size': 0.01,
-        'n_quantiles': 5,
-        'rebalance_frequency': 'W',
-        'min_history_periods': 26,
-        'expected_return_method': 'shrinkage',
-        'decay_factor': 0.97,
-        'winsorize_limits': (0.02, 0.98),
-        'momentum_skip': 21,
-        'volatility_lookback': 63,
-        'min_history_days': 126
+        # Portfolio mapping
+        'min_weight_per_stock': signal_settings.get('min_weight_per_stock', 0.02),
+        'signal_concentration': signal_settings.get('signal_concentration', 0.2),
+        'n_quantiles': signal_settings.get('n_quantiles', 5),
+        'min_trade_size': signal_settings.get('min_trade_size', 0.01),
+        'rebalance_frequency': signal_settings.get('rebalance_frequency', 'W'),
+        'winsorize_limits': tuple(signal_settings.get('winsorize_limits', [0.02, 0.98])),
+        'min_market_cap': signal_settings.get('min_market_cap', 100_000_000_000),  # 100B KRW
+        'min_avg_trading_value': signal_settings.get('min_avg_trading_value', 3_000_000_000),  # 3B KRW
+        
+        # Transaction costs (Phase 2)
+        'commission_rate': signal_settings.get('commission_rate', 0.001),
+        'tax_rate': signal_settings.get('tax_rate', 0.0023),
+        'use_market_impact': signal_settings.get('use_market_impact', False),
+        'market_impact_coef': signal_settings.get('market_impact_coef', 0.1),
+        'min_trade_threshold': signal_settings.get('min_trade_threshold', 0.01),
+        'cost_penalty_weight': signal_settings.get('cost_penalty_weight', 1.0),
+        
+        # Regime detection (Phase 2)
+        'use_regime_adjustment': signal_settings.get('use_regime_adjustment', True),
+        'regime_trend_window': signal_settings.get('regime_trend_window', 63),
+        'regime_vol_window': signal_settings.get('regime_vol_window', 21),
+        'regime_vol_lookback': signal_settings.get('regime_vol_lookback', 252),
+        'regime_momentum_window': signal_settings.get('regime_momentum_window', 21),
+        'regime_adjustment_strength': signal_settings.get('regime_adjustment_strength', 0.3),
+        'regime_smooth_transitions': signal_settings.get('regime_smooth_transitions', True),
+        'regime_transition_speed': signal_settings.get('regime_transition_speed', 0.3),
     }
     
     return SignalPipeline(config=config)
