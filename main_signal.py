@@ -208,6 +208,11 @@ def run_backtest(
     portfolio_value = 1.0
     previous_weights = None
     
+    # Load forbidden tickers once before backtest loop
+    forbidden_tickers = load_forbidden_tickers('forbidden.csv')
+    if forbidden_tickers:
+        logger.info(f"Loaded {len(forbidden_tickers)} forbidden tickers for backtest")
+    
     for i, date in enumerate(backtest_dates):
         logger.info(f"\n{'='*60}")
         logger.info(f"Rebalance {i+1}/{len(backtest_dates)}: {date.strftime('%Y-%m-%d')}")
@@ -220,7 +225,7 @@ def run_backtest(
             logger.warning(f"No fundamentals for {date}, skipping")
             continue
         
-        # Run pipeline
+        # Run pipeline with forbidden tickers excluded BEFORE optimization
         result = pipeline.run(
             prices=dm.prices.loc[:date],
             returns=dm.returns.loc[:date],
@@ -228,18 +233,10 @@ def run_backtest(
             fundamentals=fundamentals,
             sector_map=dm.sector_map,
             rebalance_date=date,
-            warmup_mode=False
+            warmup_mode=False,
+            forbidden_tickers=forbidden_tickers,
+            trading_values=dm.trading_values.loc[:date]
         )
-        
-        # Apply compliance filter - remove forbidden tickers
-        forbidden_tickers = load_forbidden_tickers('forbidden.csv')
-        if forbidden_tickers and not result['weights'].empty:
-            result['weights'] = result['weights'].drop(
-                labels=[t for t in result['weights'].index if t in forbidden_tickers],
-                errors='ignore'
-            )
-            if result['weights'].sum() > 0:
-                result['weights'] = result['weights'] / result['weights'].sum()
         
         if result['weights'].empty:
             logger.warning(f"No weights generated for {date}")
@@ -377,6 +374,11 @@ def run_live(
             warmup_mode=True
         )
     
+    # Load forbidden tickers BEFORE running pipeline
+    forbidden_tickers = load_forbidden_tickers('forbidden.csv')
+    if forbidden_tickers:
+        logger.info(f"Loaded {len(forbidden_tickers)} forbidden tickers")
+    
     # Run live
     fundamentals = prepare_fundamentals_for_date(dm, rebalance_date)
     
@@ -387,23 +389,10 @@ def run_live(
         fundamentals=fundamentals,
         sector_map=dm.sector_map,
         rebalance_date=rebalance_date,
-        warmup_mode=False
+        warmup_mode=False,
+        forbidden_tickers=forbidden_tickers,
+        trading_values=dm.trading_values
     )
-    
-    # Apply compliance filter - remove forbidden tickers
-    forbidden_tickers = load_forbidden_tickers('forbidden.csv')
-    if forbidden_tickers and not result['weights'].empty:
-        original_count = len(result['weights'])
-        result['weights'] = result['weights'].drop(
-            labels=[t for t in result['weights'].index if t in forbidden_tickers],
-            errors='ignore'
-        )
-        # Re-normalize weights
-        if result['weights'].sum() > 0:
-            result['weights'] = result['weights'] / result['weights'].sum()
-        removed_count = original_count - len(result['weights'])
-        if removed_count > 0:
-            logger.info(f"Removed {removed_count} forbidden tickers from portfolio")
     
     # Output portfolio
     if not result['weights'].empty:
