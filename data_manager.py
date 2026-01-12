@@ -37,7 +37,7 @@ class DataManager:
         self._macro = MacroFetcher(fred_api_key=os.getenv('FRED_API_KEY'))
         self.tickers: List[str] = []; self.sector_map: Dict[str, str] = {}
         # Dataframes to be populated by load_data()
-        self.prices, self.volumes, self.market_caps, self.returns = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        self.prices, self.volumes, self.market_caps, self.returns, self.trading_values = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         self.latest_fundamentals, self.historical_fundamentals = pd.DataFrame(), {}
         self.macro_data, self.market_prices = pd.DataFrame(), pd.DataFrame()
 
@@ -331,7 +331,7 @@ class DataManager:
                 
             placeholders = ','.join(['?'] * len(self.tickers))
             query = f"""
-                SELECT code, date, close, volume, market_cap
+                SELECT code, date, close, volume, market_cap, value
                 FROM daily_prices 
                 WHERE date BETWEEN ? AND ? AND code IN ({placeholders})
             """
@@ -345,6 +345,7 @@ class DataManager:
                 self.prices = pd.DataFrame(columns=self.tickers, index=pd.date_range(self.start_date, self.end_date))
                 self.volumes = pd.DataFrame(columns=self.tickers, index=pd.date_range(self.start_date, self.end_date))
                 self.market_caps = pd.DataFrame(columns=self.tickers, index=pd.date_range(self.start_date, self.end_date))
+                self.trading_values = pd.DataFrame(columns=self.tickers, index=pd.date_range(self.start_date, self.end_date))
                 self.returns = pd.DataFrame(columns=self.tickers, index=pd.date_range(self.start_date, self.end_date))
                 return True
                     
@@ -352,6 +353,7 @@ class DataManager:
             price_df = df.pivot(index='date', columns='code', values='close')
             volume_df = df.pivot(index='date', columns='code', values='volume')
             market_cap_df = df.pivot(index='date', columns='code', values='market_cap')
+            trading_value_df = df.pivot(index='date', columns='code', values='value')
 
             # --- Diagnostic Check for Market Cap ---
             if market_cap_df.isnull().all().all():
@@ -368,11 +370,13 @@ class DataManager:
             price_df = price_df.reindex(index=full_date_range, columns=self.tickers)
             volume_df = volume_df.reindex(index=full_date_range, columns=self.tickers)
             market_cap_df = market_cap_df.reindex(index=full_date_range, columns=self.tickers)
+            trading_value_df = trading_value_df.reindex(index=full_date_range, columns=self.tickers)
 
             # Apply a robust filling strategy and assign to self.
             self.prices = price_df.ffill().bfill().fillna(0)
             self.volumes = volume_df.ffill().bfill().fillna(0)
             self.market_caps = market_cap_df.ffill().bfill().fillna(0)
+            self.trading_values = trading_value_df.ffill().bfill().fillna(0)
 
             # Calculate returns on the fully cleaned price data
             # Calculate returns, cap extreme losses, and handle NaNs
