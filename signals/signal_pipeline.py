@@ -75,7 +75,8 @@ class SignalPipeline:
             max_weight_per_stock=self.config.get('max_weight_per_stock', 0.15),
             min_weight_per_stock=self.config.get('min_weight_per_stock', 0.02),
             signal_concentration=self.config.get('signal_concentration', 0.2),
-            sector_max_weight=self.config.get('sector_max_weight', 0.40)
+            sector_max_weight=self.config.get('sector_max_weight', 0.40),
+            sector_limits=self.config.get('sector_limits', {})
         )
         
         self.turnover_manager = TurnoverManager(
@@ -561,21 +562,30 @@ class SignalPipeline:
         logger.info("Pipeline state reset")
 
 
-def create_pipeline_from_config(cfg) -> SignalPipeline:
+def create_pipeline_from_config(cfg, rebalance_date=None) -> SignalPipeline:
     """
     Create SignalPipeline from Config object.
     
     Args:
         cfg: Config object from config.py
+        rebalance_date: Date for loading sector limits (defaults to today)
         
     Returns:
         Configured SignalPipeline
     """
+    import pandas as pd
+    from utils.sector_parser import parse_sector_limits_for_date
+    
     # Extract from nested config dictionaries
     opt_settings = cfg.optimization_settings
     risk_mgmt = cfg.risk_management
     factor_settings = cfg.factor_settings
     signal_settings = getattr(cfg, 'signal_settings', {}) or {}
+    
+    # Load per-sector limits from market_sectors.csv
+    if rebalance_date is None:
+        rebalance_date = pd.Timestamp.now()
+    sector_limits = parse_sector_limits_for_date('market_sectors.csv', rebalance_date)
     
     config = {
         # From optimization settings
@@ -583,6 +593,7 @@ def create_pipeline_from_config(cfg) -> SignalPipeline:
         'max_weight_per_stock': signal_settings.get('max_weight_per_stock', opt_settings.get('individual_limit', 0.15)),
         'risk_aversion': signal_settings.get('risk_aversion', opt_settings.get('risk_aversion', 1.0)),
         'sector_max_weight': signal_settings.get('sector_max_weight', opt_settings.get('sector_limit', 0.40)),
+        'sector_limits': sector_limits,  # Per-sector limits from market_sectors.csv
         
         # From signal settings (with fallbacks)
         'max_turnover': signal_settings.get('max_turnover', risk_mgmt.get('turnover_limit', 0.30)),
