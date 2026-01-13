@@ -44,7 +44,8 @@ class PortfolioMapper:
         max_weight_per_stock: float = 0.15,
         min_weight_per_stock: float = 0.02,
         signal_concentration: float = 0.2,
-        sector_max_weight: float = 0.40
+        sector_max_weight: float = 0.40,
+        sector_limits: Optional[Dict[str, float]] = None
     ):
         """
         Initialize portfolio mapper.
@@ -54,19 +55,24 @@ class PortfolioMapper:
             max_weight_per_stock: Maximum weight for any single stock
             min_weight_per_stock: Minimum weight (below this, exclude)
             signal_concentration: Top fraction of stocks per signal (0.2 = top 20%)
-            sector_max_weight: Maximum weight per sector
+            sector_max_weight: Default maximum weight per sector (fallback)
+            sector_limits: Per-sector limits from market_sectors.csv {sector: limit}
         """
         self.max_positions = max_positions
         self.max_weight_per_stock = max_weight_per_stock
         self.min_weight_per_stock = min_weight_per_stock
         self.signal_concentration = signal_concentration
         self.sector_max_weight = sector_max_weight
+        self.sector_limits = sector_limits or {}
         
         logger.info(f"PortfolioMapper initialized:")
         logger.info(f"  - Max positions: {max_positions}")
         logger.info(f"  - Weight bounds: [{min_weight_per_stock}, {max_weight_per_stock}]")
         logger.info(f"  - Signal concentration: top {signal_concentration:.0%}")
-        logger.info(f"  - Sector max weight: {sector_max_weight:.0%}")
+        if self.sector_limits:
+            logger.info(f"  - Per-sector limits: {len(self.sector_limits)} sectors from market_sectors.csv")
+        else:
+            logger.info(f"  - Sector max weight: {sector_max_weight:.0%} (default)")
     
     def map_signals_to_stocks(
         self,
@@ -251,12 +257,39 @@ class PortfolioMapper:
         
         weights = weights / weights.sum()  # Re-normalize
         
-        # Step 4: Enforce sector constraints if sector_map provided
-        if sector_map is not None:
-            weights = self._apply_sector_constraints(weights, sector_map, composite_scores)
+        # Step 4: Iteratively apply all constraints until satisfied
+        # Use slightly tighter internal limits to account for normalization effects
+        internal_max_weight = self.max_weight_per_stock * 0.99  # 14.85% internal -> 15% after normalization
+        internal_sector_buffer = 0.99
         
-        # Final normalization
-        weights = weights / weights.sum()
+        max_outer_iterations = 15
+        for outer_iter in range(max_outer_iterations):
+            weights = weights / weights.sum()  # Normalize first
+            
+            # Apply sector constraints with buffer
+            if sector_map is not None:
+                weights = self._apply_sector_constraints(weights, sector_map, composite_scores, buffer=internal_sector_buffer)
+            
+            # Apply max weight constraint
+            if weights.max() > internal_max_weight:
+                weights = weights.clip(upper=internal_max_weight)
+                weights = weights / weights.sum()
+            
+            # Check if all constraints are satisfied (with actual limits, not internal)
+            max_weight_ok = weights.max() <= self.max_weight_per_stock
+            
+            sector_ok = True
+            if sector_map is not None:
+                stock_sectors = pd.Series({t: sector_map.get(t, 'Unknown') for t in weights.index})
+                sector_weights = weights.groupby(stock_sectors).sum()
+                for sector, sw in sector_weights.items():
+                    limit = self.sector_limits.get(sector, self.sector_max_weight)
+                    if sw > limit:
+                        sector_ok = False
+                        break
+            
+            if max_weight_ok and sector_ok:
+                break
         
         # Round to reasonable precision
         weights = weights.round(4)
@@ -265,16 +298,53 @@ class PortfolioMapper:
         weights = weights[weights > 0]
         weights = weights / weights.sum()
         
+        # Final hard enforcement - clip to exact limits (no normalization after this)
+        if weights.max() > self.max_weight_per_stock:
+            excess = weights.max() - self.max_weight_per_stock
+            max_ticker = weights.idxmax()
+            weights[max_ticker] = self.max_weight_per_stock
+            # Distribute excess to smallest positions
+            other_tickers = weights.index.difference([max_ticker])
+            if len(other_tickers) > 0:
+                weights.loc[other_tickers] += excess / len(other_tickers)
+        
+        return weights
+    
+    def _enforce_max_weight(self, weights: pd.Series) -> pd.Series:
+        """
+        Enforce max_weight_per_stock constraint with iterative redistribution.
+        """
+        max_iterations = 10
+        for _ in range(max_iterations):
+            if weights.max() <= self.max_weight_per_stock + 0.0001:
+                break
+            
+            # Cap weights at max
+            excess_mask = weights > self.max_weight_per_stock
+            excess = weights[excess_mask] - self.max_weight_per_stock
+            weights[excess_mask] = self.max_weight_per_stock
+            
+            # Redistribute excess proportionally to remaining stocks
+            remaining_mask = weights < self.max_weight_per_stock
+            if remaining_mask.sum() > 0:
+                remaining = weights[remaining_mask]
+                redistribution = excess.sum() * (remaining / remaining.sum())
+                weights.loc[remaining.index] += redistribution
+        
         return weights
     
     def _apply_sector_constraints(
         self,
         weights: pd.Series,
         sector_map: Dict[str, str],
-        composite_scores: pd.Series
+        composite_scores: pd.Series,
+        buffer: float = 1.0
     ) -> pd.Series:
         """
         Apply sector weight constraints.
+        
+        Args:
+            buffer: Multiplier for limits (e.g., 0.99 = 99% of limit for safety margin)
         """
         # Get sector for each stock
         stock_sectors = pd.Series({
@@ -282,27 +352,38 @@ class PortfolioMapper:
             for ticker in weights.index
         })
         
-        # Calculate sector weights
-        sector_weights = weights.groupby(stock_sectors).sum()
-        
-        # Check for violations
-        violations = sector_weights[sector_weights > self.sector_max_weight]
-        
-        if len(violations) == 0:
-            return weights
-        
-        logger.info(f"Sector constraint violations: {violations.to_dict()}")
-        
-        # Reduce weights in over-concentrated sectors
-        for sector, sector_weight in violations.items():
-            sector_stocks = stock_sectors[stock_sectors == sector].index
+        # Iteratively apply sector constraints until all are satisfied
+        max_iterations = 10
+        for iteration in range(max_iterations):
+            # Calculate sector weights
+            sector_weights = weights.groupby(stock_sectors).sum()
             
-            # Scale down sector stocks
-            scale_factor = self.sector_max_weight / sector_weight
-            weights.loc[sector_stocks] *= scale_factor
+            # Check for violations using per-sector limits (with buffer)
+            violations = {}
+            for sector, sector_weight in sector_weights.items():
+                limit = self.sector_limits.get(sector, self.sector_max_weight) * buffer
+                if sector_weight > limit + 0.0001:
+                    violations[sector] = (sector_weight, limit)
+            
+            if len(violations) == 0:
+                break
+            
+            if iteration == 0:
+                logger.info(f"Sector constraint violations: {[(s, f'{w:.1%}>{l:.1%}') for s,(w,l) in violations.items()]}")
+            
+            # Reduce weights in over-concentrated sectors
+            for sector, (sector_weight, limit) in violations.items():
+                sector_stocks = stock_sectors[stock_sectors == sector].index
+                
+                # Scale down sector stocks to exactly the limit
+                scale_factor = limit / sector_weight
+                weights.loc[sector_stocks] *= scale_factor
+            
+            # Re-normalize to sum to 1
+            weights = weights / weights.sum()
         
-        # Re-normalize
-        weights = weights / weights.sum()
+        if iteration == max_iterations - 1:
+            logger.warning(f"Sector constraints not fully satisfied after {max_iterations} iterations")
         
         return weights
     
