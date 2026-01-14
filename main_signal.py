@@ -295,6 +295,21 @@ def run_backtest(
         logger.info(f"Sharpe Ratio: {results['sharpe_ratio']:.2f}")
         logger.info(f"Max Drawdown: {results['max_drawdown']:.2%}")
         logger.info(f"Win Rate: {results['win_rate']:.2%}")
+        
+        # IC Summary from backtest
+        ic_summary = pipeline.ic_monitor.get_ic_summary()
+        if not ic_summary.empty:
+            logger.info("\n" + "=" * 60)
+            logger.info("SIGNAL IC SUMMARY (Backtest)")
+            logger.info("=" * 60)
+            for signal_name, row in ic_summary.iterrows():
+                status = "OK" if row['mean_ic'] >= 0.02 else "⚠️ LOW"
+                logger.info(f"  {signal_name}: Mean IC={row['mean_ic']:+.4f}, "
+                           f"Std={row['std_ic']:.4f}, "
+                           f"N={int(row['n_observations'])} [{status}]")
+            
+            # Store IC summary in results
+            results['ic_summary'] = ic_summary.to_dict()
     
     return results
 
@@ -403,6 +418,20 @@ def run_live(
         for ticker, weight in result['weights'].sort_values(ascending=False).items():
             sector = dm.sector_map.get(ticker, 'Unknown')
             logger.info(f"  {ticker}: {weight:.2%} (sector: {sector})")
+        
+        # Log IC summary if available
+        if result.get('ic_values'):
+            logger.info("\n" + "=" * 60)
+            logger.info("SIGNAL INFORMATION COEFFICIENTS")
+            logger.info("=" * 60)
+            for signal_name, ic in sorted(result['ic_values'].items(), key=lambda x: -x[1] if not np.isnan(x[1]) else -999):
+                status = "OK" if ic >= 0.02 else "⚠️ LOW"
+                logger.info(f"  {signal_name}: IC={ic:+.4f} [{status}]")
+            
+            if result.get('ic_alerts'):
+                logger.info("\n⚠️ IC ALERTS:")
+                for signal_name, alert_msg in result['ic_alerts'].items():
+                    logger.info(f"  {signal_name}: {alert_msg}")
         
         # Save to file
         output_path = Path('output')
