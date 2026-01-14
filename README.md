@@ -39,6 +39,12 @@ A **signal-based portfolio optimization system** for the Korean equity market (K
 - **Market Cap Filter**: Min 100B KRW (시가총액 1,000억원 이상)
 - **Liquidity Filter**: Min 3B KRW 5-day avg trading value (5일 평균 거래대금 30억원 이상)
 
+### Signal Quality Monitoring (IC Monitor)
+- **Information Coefficient**: Tracks IC = cor(signal/σ, forward_return/σ) for each signal
+- **Rolling IC History**: 26-week rolling average for trend detection
+- **Alert System**: Warns when IC drops below threshold (default: 0.02)
+- **Persistent Storage**: IC history saved to `output/ic_history.json`
+
 ---
 
 ## System Architecture
@@ -52,7 +58,8 @@ A **signal-based portfolio optimization system** for the Korean equity market (K
 │   ├── portfolio_mapper.py     # Maps signals to stock weights
 │   ├── signal_pipeline.py      # End-to-end orchestration
 │   ├── transaction_costs.py    # Transaction cost model
-│   └── regime_signal_weights.py # Regime detection & adjustment
+│   ├── regime_signal_weights.py # Regime detection & adjustment
+│   └── ic_monitor.py           # Information Coefficient monitoring
 │
 ├── config.py                   # Configuration loader
 ├── data_manager.py             # Data access layer
