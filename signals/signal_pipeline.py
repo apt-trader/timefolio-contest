@@ -25,6 +25,7 @@ from signals.signal_optimizer import SignalOptimizer, SignalReturnEstimator
 from signals.portfolio_mapper import PortfolioMapper, TurnoverManager
 from signals.transaction_costs import TransactionCostModel, CostAwarePortfolioMapper, create_korean_cost_model
 from signals.regime_signal_weights import RegimeDetector, RegimeSignalAdjuster, MarketRegime, create_default_regime_system
+from signals.ic_monitor import ICMonitor, compute_forward_returns
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,16 @@ class SignalPipeline:
         self.signal_returns_history: Optional[pd.DataFrame] = None
         self.current_weights: Optional[pd.Series] = None
         
+        # IC Monitoring (Phase 1 enhancement)
+        ic_history_file = self.config.get('ic_history_file', 'output/ic_history.json')
+        self.ic_monitor = ICMonitor(
+            ic_threshold=self.config.get('ic_threshold', 0.02),
+            rolling_window=self.config.get('ic_rolling_window', 26),
+            history_file=ic_history_file
+        )
+        self.last_signals_for_ic: Optional[pd.DataFrame] = None
+        self.last_rebalance_date_for_ic: Optional[pd.Timestamp] = None
+        
         logger.info("SignalPipeline initialized")
         logger.info(f"  - Max positions: {self.config.get('max_positions', 15)}")
         logger.info(f"  - Risk aversion: {self.config.get('risk_aversion', 1.0)}")
@@ -183,7 +194,13 @@ class SignalPipeline:
             'regime_momentum_window': 21,
             'regime_adjustment_strength': 0.5,
             'regime_smooth_transitions': True,
-            'regime_transition_speed': 0.3
+            'regime_transition_speed': 0.3,
+            
+            # IC Monitoring
+            'ic_threshold': 0.02,              # Minimum acceptable IC
+            'ic_rolling_window': 26,           # Rolling window for IC average
+            'ic_history_file': 'output/ic_history.json',
+            'ic_forward_horizon': 5            # Days for forward return calculation
         }
     
     def run(
@@ -418,6 +435,57 @@ class SignalPipeline:
             metrics['trend_score'] = regime_info['trend_score']
             metrics['vol_ratio'] = regime_info['vol_ratio']
         
+        # Step 7: IC Monitoring - compute IC for previous period's signals
+        ic_values = {}
+        ic_alerts = {}
+        if self.last_signals_for_ic is not None and self.last_rebalance_date_for_ic is not None:
+            logger.info("Step 7: Computing Information Coefficient for previous signals...")
+            
+            # Compute forward returns from last rebalance date
+            forward_horizon = self.config.get('ic_forward_horizon', 5)
+            forward_returns = compute_forward_returns(
+                prices=prices,
+                current_date=self.last_rebalance_date_for_ic,
+                horizon_days=forward_horizon
+            )
+            
+            if not forward_returns.empty:
+                # Compute volatilities for risk adjustment
+                vol_lookback = self.config.get('volatility_lookback', 63)
+                vol_end_idx = prices.index.get_loc(self.last_rebalance_date_for_ic)
+                vol_start_idx = max(0, vol_end_idx - vol_lookback)
+                recent_returns = returns.iloc[vol_start_idx:vol_end_idx]
+                volatilities = recent_returns.std()
+                
+                # Compute IC
+                ic_values = self.ic_monitor.compute_ic(
+                    signals=self.last_signals_for_ic,
+                    forward_returns=forward_returns,
+                    volatilities=volatilities
+                )
+                
+                # Record and check for alerts
+                if ic_values:
+                    ic_alerts = self.ic_monitor.record_ic(
+                        date=self.last_rebalance_date_for_ic,
+                        ic_values=ic_values
+                    )
+                    
+                    # Log IC report
+                    ic_report = self.ic_monitor.format_ic_report(ic_values, self.last_rebalance_date_for_ic)
+                    for line in ic_report.split('\n'):
+                        logger.info(line)
+        
+        # Store current signals for next IC computation
+        self.last_signals_for_ic = signals.copy()
+        self.last_rebalance_date_for_ic = rebalance_date
+        
+        # Add IC metrics
+        metrics['ic_values'] = ic_values
+        metrics['ic_alerts'] = ic_alerts
+        if ic_values:
+            metrics['ic_mean'] = np.mean([v for v in ic_values.values() if not np.isnan(v)])
+        
         logger.info(f"Pipeline complete: {len(final_weights)} positions")
         
         return {
@@ -425,7 +493,9 @@ class SignalPipeline:
             'signal_weights': signal_weights,
             'signals': signals,
             'metrics': metrics,
-            'regime_info': regime_info
+            'regime_info': regime_info,
+            'ic_values': ic_values,
+            'ic_alerts': ic_alerts
         }
     
     def warmup(
