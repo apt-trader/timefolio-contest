@@ -173,10 +173,9 @@ class FinancialsFetcher:
                 if pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table' AND name='company_mapping'", conn).empty:
                     logger.warning("'company_mapping' table not found. Ticker lookups will rely solely on API calls.")
                     return {}
-                # Corrected query to use the actual column name '종목코드' and alias it to 'code'.
-                df = pd.read_sql_query("SELECT \"종목코드\" as code, corp_code FROM company_mapping", conn)
-                df['code'] = df['code'].astype(str).str.zfill(6)
-                mapping = df.set_index('code')['corp_code'].to_dict()
+                df = pd.read_sql_query("SELECT ticker, corp_code FROM company_mapping WHERE ticker IS NOT NULL", conn)
+                df['ticker'] = df['ticker'].astype(str).str.zfill(6)
+                mapping = df.set_index('ticker')['corp_code'].to_dict()
                 logger.info(f"Successfully loaded {len(mapping)} company mappings.")
                 return mapping
         except Exception as e:
@@ -578,9 +577,16 @@ class FinancialsFetcher:
         self._ensure_ticker_field_populated(df)
         
         # Standardize column names before storing
-        # Check for a date column and standardize it. If none exists, we can't store it.
+        # Rename DART API column names to DB column names
         if 'rcept_dt' in df.columns:
             df = df.rename(columns={'rcept_dt': 'report_date'})
+        if 'reprt_code' in df.columns:
+            df = df.rename(columns={'reprt_code': 'report_code'})
+        
+        # If report_code is missing, add it from the parameter
+        if 'report_code' not in df.columns:
+            df['report_code'] = report_code
+        
         # If date is missing, create a proxy date to avoid data loss.
         if 'report_date' not in df.columns:
             ticker_info = df['ticker'].iloc[0] if 'ticker' in df.columns and not df.empty else 'N/A'
@@ -599,8 +605,8 @@ class FinancialsFetcher:
                 logger.error(f"Cannot determine proxy date for unknown report_code: {report_code}. Skipping {ticker_info}.")
                 return
 
-        # UPDATED: Include ticker in required columns
-        required_cols = {'corp_code', 'ticker', 'report_date', 'reprt_code', 'account_nm'}
+        # UPDATED: Include ticker in required columns (use DB column names after renaming)
+        required_cols = {'corp_code', 'ticker', 'report_date', 'report_code', 'account_nm'}
         if not required_cols.issubset(df.columns):
             logger.error(f"Dataframe is missing one of required columns for storage: {required_cols - set(df.columns)}")
             return
@@ -645,3 +651,55 @@ class FinancialsFetcher:
                 for code, name in report_codes.items():
                     self._fetch_and_store_for_ticker(ticker, year, code)
                     time.sleep(random.uniform(0.8, 1.2))
+
+    def fetch_all_for_report_type(self, year: int, report_type: str):
+        """
+        Fetch financials for all tickers in the universe for a specific year and report type.
+        
+        Args:
+            year: Fiscal year (e.g., 2025)
+            report_type: DART report code ('11011'=Annual, '11012'=Q2, '11013'=Q1, '11014'=Q3)
+        """
+        if not self.dart:
+            logger.error("Cannot fetch financials: DART API key not set.")
+            return
+        
+        report_names = {'11013': 'Q1', '11012': 'Q2', '11014': 'Q3', '11011': 'Annual'}
+        report_name = report_names.get(report_type, report_type)
+        
+        # Get all tickers from company_mapping
+        tickers = list(self.ticker_to_corp_code_map.keys())
+        logger.info(f"Fetching {report_name} {year} financials for {len(tickers)} tickers...")
+        
+        success_count = 0
+        error_count = 0
+        
+        for ticker in tqdm(tickers, desc=f"Fetching {report_name} {year}"):
+            try:
+                self._fetch_and_store_for_ticker(ticker, year, report_type)
+                success_count += 1
+            except Exception as e:
+                logger.debug(f"Error fetching {ticker}: {e}")
+                error_count += 1
+            time.sleep(random.uniform(0.5, 1.0))
+        
+        logger.info(f"Completed: {success_count} success, {error_count} errors")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Fetch financial statements from DART API')
+    parser.add_argument('--year', type=int, required=True, help='Fiscal year (e.g., 2025)')
+    parser.add_argument('--report-type', type=str, required=True, 
+                        choices=['11011', '11012', '11013', '11014'],
+                        help='Report type: 11011=Annual, 11012=Q2, 11013=Q1, 11014=Q3')
+    parser.add_argument('--db-path', type=str, default='db/krx_data.db', help='Path to database')
+    
+    args = parser.parse_args()
+    
+    api_key = os.getenv('DART_API_KEY')
+    if not api_key:
+        logger.error("DART_API_KEY environment variable not set")
+        sys.exit(1)
+    
+    fetcher = FinancialsFetcher(api_key=api_key, db_path=args.db_path)
+    fetcher.fetch_all_for_report_type(year=args.year, report_type=args.report_type)
