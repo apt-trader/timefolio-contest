@@ -222,6 +222,13 @@ class SignalConstructor:
             c2p = self._winsorize(c2p)
             value_components['C2P'] = c2p
         
+        # Dividend Yield (DS002 enhancement)
+        if 'dividend_yield' in fundamentals.columns:
+            div_yield = fundamentals['dividend_yield']
+            div_yield = self._winsorize(div_yield)
+            value_components['DivYield'] = div_yield
+            logger.info(f"  Added DivYield component: {div_yield.notna().sum()} valid")
+        
         if not value_components:
             logger.warning("No value components available")
             return pd.Series(index=fundamentals.index, data=np.nan)
@@ -276,6 +283,15 @@ class SignalConstructor:
             gpa = fundamentals['gross_profit'] / fundamentals['total_assets'].replace(0, np.nan)
             gpa = self._winsorize(gpa)
             quality_components['GPA'] = gpa
+        
+        # Buyback Signal (DS002 enhancement) - net buyback indicates management confidence
+        if 'net_buyback' in fundamentals.columns:
+            buyback = fundamentals['net_buyback']
+            # Positive buyback = good (management buying back shares)
+            buyback_signal = buyback.clip(lower=0)  # Only count positive buybacks
+            buyback_signal = self._winsorize(buyback_signal)
+            quality_components['Buyback'] = buyback_signal
+            logger.info(f"  Added Buyback component: {buyback_signal.notna().sum()} valid")
         
         if not quality_components:
             logger.warning("No quality components available")
