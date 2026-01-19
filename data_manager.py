@@ -40,6 +40,7 @@ class DataManager:
         self.prices, self.volumes, self.market_caps, self.returns, self.trading_values = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         self.latest_fundamentals, self.historical_fundamentals = pd.DataFrame(), {}
         self.macro_data, self.market_prices = pd.DataFrame(), pd.DataFrame()
+        self.dividends, self.treasury_stock = pd.DataFrame(), pd.DataFrame()
 
     def _create_connection(self):
         """Creates a database connection."""
@@ -204,6 +205,12 @@ class DataManager:
             macro_query = f"SELECT * FROM macro_data WHERE date BETWEEN '{self.start_date.strftime('%Y-%m-%d')}' AND '{self.end_date.strftime('%Y-%m-%d')}'"
             self.macro_data = pd.read_sql(macro_query, self.conn, index_col='date', parse_dates=['date'])
             logger.info("Step 5 SUCCESS: Macroeconomic data fetched and loaded.")
+
+            # Step 5.5: Loading dividend and treasury stock data...
+            logger.info("Step 5.5: Loading dividend and treasury stock data...")
+            self._load_dividend_data()
+            self._load_treasury_stock_data()
+            logger.info("Step 5.5 SUCCESS: Dividend and treasury stock data loaded.")
 
             if self.prices.empty:
                 logger.error("No market data loaded for the specified universe and date range.")
@@ -612,6 +619,63 @@ class DataManager:
         # Fundamental data coverage
         if not self.latest_fundamentals.empty:
             logger.info(f"Latest fundamentals coverage: {len(self.latest_fundamentals)}/{len(self.tickers)} tickers")
+
+    def _load_dividend_data(self) -> None:
+        """Load dividend data from the database."""
+        try:
+            query = """
+            SELECT ticker, fiscal_year, dividend_per_share, dividend_yield, payout_ratio
+            FROM dividends
+            WHERE ticker IN ({})
+            """.format(','.join(['?'] * len(self.tickers)))
+            with sqlite3.connect(self.db_path) as conn:
+                # Check if table exists
+                tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table' AND name='dividends'", conn)
+                if tables.empty:
+                    logger.info("Dividends table not found. Skipping dividend data loading.")
+                    self.dividends = pd.DataFrame()
+                    return
+                self.dividends = pd.read_sql(query, conn, params=self.tickers)
+                if not self.dividends.empty:
+                    self.dividends['ticker'] = self.dividends['ticker'].astype(str).str.zfill(6)
+                    logger.info(f"Loaded dividend data for {self.dividends['ticker'].nunique()} tickers.")
+                else:
+                    logger.info("No dividend data found for universe tickers.")
+        except Exception as e:
+            logger.warning(f"Error loading dividend data: {e}")
+            self.dividends = pd.DataFrame()
+
+    def _load_treasury_stock_data(self) -> None:
+        """Load treasury stock (buyback) data from the database."""
+        try:
+            query = """
+            SELECT ticker, fiscal_year, 
+                   SUM(COALESCE(change_qy_acqs, 0)) as total_acquired,
+                   SUM(COALESCE(change_qy_dsps, 0)) as total_disposed,
+                   MAX(trmend_qy) as ending_treasury_shares
+            FROM treasury_stock
+            WHERE ticker IN ({})
+            GROUP BY ticker, fiscal_year
+            """.format(','.join(['?'] * len(self.tickers)))
+            with sqlite3.connect(self.db_path) as conn:
+                # Check if table exists
+                tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table' AND name='treasury_stock'", conn)
+                if tables.empty:
+                    logger.info("Treasury stock table not found. Skipping treasury stock data loading.")
+                    self.treasury_stock = pd.DataFrame()
+                    return
+                self.treasury_stock = pd.read_sql(query, conn, params=self.tickers)
+                if not self.treasury_stock.empty:
+                    self.treasury_stock['ticker'] = self.treasury_stock['ticker'].astype(str).str.zfill(6)
+                    self.treasury_stock['net_buyback'] = (
+                        self.treasury_stock['total_acquired'] - self.treasury_stock['total_disposed']
+                    )
+                    logger.info(f"Loaded treasury stock data for {self.treasury_stock['ticker'].nunique()} tickers.")
+                else:
+                    logger.info("No treasury stock data found for universe tickers.")
+        except Exception as e:
+            logger.warning(f"Error loading treasury stock data: {e}")
+            self.treasury_stock = pd.DataFrame()
 
     def _load_full_macro_data(self) -> pd.DataFrame:
         """Load macroeconomic data from the database."""
