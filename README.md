@@ -23,6 +23,11 @@ A **signal-based portfolio optimization system** for the Korean equity market (K
 - **Higher SNR**: Signal portfolios have ~10x higher signal-to-noise ratio
 - **Robust Covariance**: Ledoit-Wolf shrinkage for stable estimation
 
+### DS002 Data Enhancement (NEW)
+- **Dividend Data**: Dividend yield integrated into Value signal (alotMatter API)
+- **Buyback Data**: Treasury stock activity integrated into Quality signal (tesstkAcqsDspsSttus API)
+- **Management Confidence**: Net buyback signals management's belief in undervaluation
+
 ### Transaction Cost Awareness
 - **Korean Market Costs**: 0.1% commission + 0.23% securities transaction tax
 - **Turnover Control**: Max 15% one-way turnover per rebalance
@@ -68,6 +73,8 @@ A **signal-based portfolio optimization system** for the Korean equity market (K
 ├── fetchers/                   # Data fetching modules
 │   ├── krx_fetcher.py          # Market data (OHLCV, Market Cap)
 │   ├── financial_fetcher.py    # Fundamental data (DART)
+│   ├── dividend_fetcher.py     # ★ DS002: Dividend data (alotMatter)
+│   ├── treasury_stock_fetcher.py # ★ DS002: Buyback data (tesstkAcqsDspsSttus)
 │   └── macro_fetcher.py        # Macroeconomic data
 │
 ├── config/
@@ -189,13 +196,21 @@ signal_settings:
 
 ```bash
 # Fetch latest market data
-python fetchers/krx_fetcher.py -s 20250101 -e 20250111 --update-db
+rm cache/krx_cache/krx_cookies.pkl
+python fetchers/krx_fetcher.py -s 20260112 -e 20260118 --update-db --no-headless
 
 # Fetch macroeconomic data
-python -m fetchers.macro_fetcher -s 2025-01-01 -e 2025-01-11
+python -m fetchers.macro_fetcher -s 2026-01-12 -e 2026-01-18
 
 # Fetch financial statements
-python main.py --fetch-financials --year 2024 --report-type 11011
+python -m fetchers.financial_fetcher --year 2025 --report-type 11011  # Annual
+python -m fetchers.financial_fetcher --year 2025 --report-type 11012  # Q2
+python -m fetchers.financial_fetcher --year 2025 --report-type 11013  # Q1
+python -m fetchers.financial_fetcher --year 2025 --report-type 11014  # Q3
+
+# Fetch DS002 data (dividend and treasury stock)
+python -m fetchers.dividend_fetcher --year 2024 --report-type 11011      # Dividend data
+python -m fetchers.treasury_stock_fetcher --year 2024 --report-type 11011  # Buyback data
 ```
 
 ### Step 2: Update Compliance Files
@@ -223,8 +238,8 @@ python main_signal.py --mode backtest --start 2024-01-01 --end 2024-06-30
 
 | Signal | Components | Description |
 |--------|------------|-------------|
-| **Value** | B/P, E/P, S/P, C/P | Composite value score |
-| **Quality** | ROE, Low Leverage, Earnings Quality | Fundamental quality |
+| **Value** | B/P, E/P, S/P, C/P, **DivYield** | Composite value score (includes dividend yield) |
+| **Quality** | ROE, Low Leverage, Earnings Quality, **Buyback** | Fundamental quality (includes treasury stock) |
 | **Momentum** | 12-1 month return | Price momentum (skip recent month) |
 | **Low Volatility** | Inverse realized volatility | Defensive signal |
 | **Growth** | Revenue/Earnings growth (or ROE proxy) | Growth characteristics |
