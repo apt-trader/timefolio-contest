@@ -96,6 +96,34 @@ def prepare_fundamentals_for_date(
     if 'gross_profit' not in fundamentals.columns and 'revenue' in fundamentals.columns and 'cost_of_sales' in fundamentals.columns:
         fundamentals['gross_profit'] = fundamentals['revenue'] - fundamentals['cost_of_sales']
     
+    # Add dividend data if available
+    if not dm.dividends.empty:
+        fiscal_year = date.year
+        div_data = dm.dividends[dm.dividends['fiscal_year'] == fiscal_year].copy()
+        if div_data.empty and fiscal_year > 2020:
+            div_data = dm.dividends[dm.dividends['fiscal_year'] == fiscal_year - 1].copy()
+        if not div_data.empty:
+            div_data = div_data.drop_duplicates(subset=['ticker'], keep='last')
+            div_data = div_data.set_index('ticker')
+            for col in ['dividend_per_share', 'dividend_yield', 'payout_ratio']:
+                if col in div_data.columns:
+                    fundamentals[col] = div_data[col]
+            logger.debug(f"Added dividend data for {div_data.index.isin(fundamentals.index).sum()} tickers")
+    
+    # Add treasury stock (buyback) data if available
+    if not dm.treasury_stock.empty:
+        fiscal_year = date.year
+        ts_data = dm.treasury_stock[dm.treasury_stock['fiscal_year'] == fiscal_year].copy()
+        if ts_data.empty and fiscal_year > 2020:
+            ts_data = dm.treasury_stock[dm.treasury_stock['fiscal_year'] == fiscal_year - 1].copy()
+        if not ts_data.empty:
+            ts_data = ts_data.drop_duplicates(subset=['ticker'], keep='last')
+            ts_data = ts_data.set_index('ticker')
+            for col in ['net_buyback', 'total_acquired', 'ending_treasury_shares']:
+                if col in ts_data.columns:
+                    fundamentals[col] = ts_data[col]
+            logger.debug(f"Added treasury stock data for {ts_data.index.isin(fundamentals.index).sum()} tickers")
+    
     return fundamentals
 
 
