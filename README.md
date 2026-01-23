@@ -23,10 +23,16 @@ A **signal-based portfolio optimization system** for the Korean equity market (K
 - **Higher SNR**: Signal portfolios have ~10x higher signal-to-noise ratio
 - **Robust Covariance**: Ledoit-Wolf shrinkage for stable estimation
 
-### DS002 Data Enhancement (NEW)
+### DS002 Data Enhancement
 - **Dividend Data**: Dividend yield integrated into Value signal (alotMatter API)
 - **Buyback Data**: Treasury stock activity integrated into Quality signal (tesstkAcqsDspsSttus API)
 - **Management Confidence**: Net buyback signals management's belief in undervaluation
+
+### Toraniko Factor Model Integration (NEW)
+- **Barra-Style Risk Model**: WLS regression for factor return estimation
+- **Factor Covariance**: Ledoit-Wolf shrinkage on factor returns
+- **Risk Attribution**: Systematic vs idiosyncratic risk decomposition
+- **Enhanced Signals**: Exponential momentum, proper cross-sectional standardization
 
 ### Transaction Cost Awareness
 - **Korean Market Costs**: 0.1% commission + 0.23% securities transaction tax
@@ -59,9 +65,13 @@ A **signal-based portfolio optimization system** for the Korean equity market (K
 ├── main_signal.py              # ★ NEW ENTRY POINT
 ├── signals/                    # ★ NEW SIGNAL-BASED MODULES
 │   ├── signal_constructor.py   # Builds 5 orthogonal signals
-│   ├── signal_optimizer.py     # Signal-level MVO
+│   ├── signal_optimizer.py     # Signal-level MVO + FactorEnhancedOptimizer
 │   ├── portfolio_mapper.py     # Maps signals to stock weights
 │   ├── signal_pipeline.py      # End-to-end orchestration
+│   ├── factor_model.py         # ★ Toraniko: Barra-style factor model
+│   ├── risk_attribution.py     # ★ Toraniko: Risk decomposition
+│   ├── toraniko_signals.py     # ★ Toraniko: Enhanced signal construction
+│   ├── polars_adapter.py       # ★ Toraniko: Pandas↔Polars conversion
 │   ├── transaction_costs.py    # Transaction cost model
 │   ├── regime_signal_weights.py # Regime detection & adjustment
 │   └── ic_monitor.py           # Information Coefficient monitoring
