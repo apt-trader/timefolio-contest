@@ -21,11 +21,15 @@ from datetime import datetime, timedelta
 import logging
 
 from signals.signal_constructor import SignalConstructor
-from signals.signal_optimizer import SignalOptimizer, SignalReturnEstimator
+from signals.signal_optimizer import SignalOptimizer, SignalReturnEstimator, FactorEnhancedOptimizer
 from signals.portfolio_mapper import PortfolioMapper, TurnoverManager
 from signals.transaction_costs import TransactionCostModel, CostAwarePortfolioMapper, create_korean_cost_model
 from signals.regime_signal_weights import RegimeDetector, RegimeSignalAdjuster, MarketRegime, create_default_regime_system
 from signals.ic_monitor import ICMonitor, compute_forward_returns
+from signals.toraniko_signals import ToranikoSignalEnhancer
+from signals.factor_model import BarraFactorModel, FactorModelIntegrator
+from signals.risk_attribution import RiskAttributor
+from signals.polars_adapter import PolarsAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -137,9 +141,52 @@ class SignalPipeline:
         self.last_signals_for_ic: Optional[pd.DataFrame] = None
         self.last_rebalance_date_for_ic: Optional[pd.Timestamp] = None
         
+        # Toraniko Factor Model Integration (Phase 3)
+        self.use_factor_model = self.config.get('use_factor_model', False)
+        self.use_toraniko_signals = self.config.get('use_toraniko_signals', False)
+        
+        if self.use_factor_model:
+            self.factor_model = BarraFactorModel(
+                winsor_factor=0.05,
+                residualize_styles=self.config.get('residualize_styles', True),
+                factor_cov_lookback=self.config.get('factor_cov_lookback', 252),
+                factor_cov_halflife=self.config.get('factor_cov_halflife', 63)
+            )
+            self.factor_integrator = FactorModelIntegrator(self.factor_model)
+            self.risk_attributor = RiskAttributor()
+            self.polars_adapter = PolarsAdapter()
+            
+            # Use factor-enhanced optimizer
+            self.factor_optimizer = FactorEnhancedOptimizer(
+                risk_aversion=self.config.get('risk_aversion', 1.0),
+                min_signal_weight=self.config.get('min_signal_weight', 0.05),
+                max_signal_weight=self.config.get('max_signal_weight', 0.50),
+                turnover_penalty=self.config.get('signal_turnover_penalty', 0.01),
+                use_factor_model=True,
+                factor_cov_method=self.config.get('factor_cov_method', 'ledoit_wolf')
+            )
+        else:
+            self.factor_model = None
+            self.factor_integrator = None
+            self.risk_attributor = None
+            self.polars_adapter = None
+            self.factor_optimizer = None
+        
+        if self.use_toraniko_signals:
+            self.toraniko_enhancer = ToranikoSignalEnhancer(
+                momentum_lookback=self.config.get('momentum_lookback', 252),
+                momentum_halflife=self.config.get('momentum_halflife', 126),
+                momentum_lag=self.config.get('momentum_skip', 21),
+                winsor_factor=0.01
+            )
+        else:
+            self.toraniko_enhancer = None
+        
         logger.info("SignalPipeline initialized")
         logger.info(f"  - Max positions: {self.config.get('max_positions', 15)}")
         logger.info(f"  - Risk aversion: {self.config.get('risk_aversion', 1.0)}")
+        logger.info(f"  - Use factor model: {self.use_factor_model}")
+        logger.info(f"  - Use Toraniko signals: {self.use_toraniko_signals}")
     
     def _default_config(self) -> Dict[str, Any]:
         """Default configuration for the pipeline."""
@@ -200,7 +247,15 @@ class SignalPipeline:
             'ic_threshold': 0.02,              # Minimum acceptable IC
             'ic_rolling_window': 26,           # Rolling window for IC average
             'ic_history_file': 'output/ic_history.json',
-            'ic_forward_horizon': 5            # Days for forward return calculation
+            'ic_forward_horizon': 5,           # Days for forward return calculation
+            
+            # Toraniko Factor Model Integration (Phase 3)
+            'use_factor_model': False,         # Enable Barra-style factor model
+            'use_toraniko_signals': False,     # Use Toraniko for signal construction
+            'factor_cov_method': 'ledoit_wolf', # Factor covariance method
+            'factor_cov_lookback': 252,        # Lookback for factor covariance
+            'factor_cov_halflife': 63,         # Half-life for exponential weighting
+            'residualize_styles': True         # Orthogonalize styles to market+sector
         }
     
     def run(
@@ -708,6 +763,15 @@ def create_pipeline_from_config(cfg, rebalance_date=None) -> SignalPipeline:
         'regime_adjustment_strength': signal_settings.get('regime_adjustment_strength', 0.3),
         'regime_smooth_transitions': signal_settings.get('regime_smooth_transitions', True),
         'regime_transition_speed': signal_settings.get('regime_transition_speed', 0.3),
+        
+        # Toraniko Factor Model Integration (Phase 3)
+        'use_factor_model': signal_settings.get('use_factor_model', False),
+        'use_toraniko_signals': signal_settings.get('use_toraniko_signals', False),
+        'factor_cov_method': signal_settings.get('factor_cov_method', 'ledoit_wolf'),
+        'factor_cov_lookback': signal_settings.get('factor_cov_lookback', 252),
+        'factor_cov_halflife': signal_settings.get('factor_cov_halflife', 63),
+        'residualize_styles': signal_settings.get('residualize_styles', True),
+        'momentum_halflife': signal_settings.get('momentum_halflife', 126),
     }
     
     return SignalPipeline(config=config)
