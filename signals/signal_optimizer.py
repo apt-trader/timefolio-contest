@@ -20,10 +20,13 @@ Date: 2025-01-11
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, TYPE_CHECKING
 import cvxpy as cp
 from sklearn.covariance import LedoitWolf
 import logging
+
+if TYPE_CHECKING:
+    from signals.factor_model import BarraFactorModel, FactorModelIntegrator
 
 logger = logging.getLogger(__name__)
 
@@ -466,3 +469,238 @@ class SignalReturnEstimator:
             logger.info(f"  {col}: mean={mean_ret:.2%}, std={std_ret:.2%}")
         
         return signal_returns_df
+
+
+class FactorEnhancedOptimizer(SignalOptimizer):
+    """
+    Enhanced signal optimizer that integrates Barra-style factor model.
+    
+    Uses Toraniko's factor model for:
+    1. Better covariance estimation via factor decomposition
+    2. Risk attribution and monitoring
+    3. Factor exposure constraints
+    """
+    
+    def __init__(
+        self,
+        risk_aversion: float = 1.0,
+        min_signal_weight: float = 0.05,
+        max_signal_weight: float = 0.50,
+        turnover_penalty: float = 0.01,
+        use_shrinkage: bool = True,
+        shrinkage_target: str = 'constant_correlation',
+        use_factor_model: bool = True,
+        factor_cov_method: str = 'ledoit_wolf'
+    ):
+        """
+        Initialize factor-enhanced optimizer.
+        
+        Args:
+            use_factor_model: Whether to use Barra factor model for covariance
+            factor_cov_method: Method for factor covariance ('ledoit_wolf', 'exponential', 'sample')
+        """
+        super().__init__(
+            risk_aversion=risk_aversion,
+            min_signal_weight=min_signal_weight,
+            max_signal_weight=max_signal_weight,
+            turnover_penalty=turnover_penalty,
+            use_shrinkage=use_shrinkage,
+            shrinkage_target=shrinkage_target
+        )
+        
+        self.use_factor_model = use_factor_model
+        self.factor_cov_method = factor_cov_method
+        
+        # Factor model components (lazy initialization)
+        self._factor_model = None
+        self._factor_integrator = None
+        self._risk_attributor = None
+        
+        logger.info(f"FactorEnhancedOptimizer initialized:")
+        logger.info(f"  - Use factor model: {use_factor_model}")
+        logger.info(f"  - Factor cov method: {factor_cov_method}")
+    
+    @property
+    def factor_model(self):
+        """Lazy initialization of factor model."""
+        if self._factor_model is None:
+            from signals.factor_model import BarraFactorModel
+            self._factor_model = BarraFactorModel(
+                winsor_factor=0.05,
+                residualize_styles=True,
+                factor_cov_lookback=252,
+                factor_cov_halflife=63
+            )
+        return self._factor_model
+    
+    @property
+    def factor_integrator(self):
+        """Lazy initialization of factor integrator."""
+        if self._factor_integrator is None:
+            from signals.factor_model import FactorModelIntegrator
+            self._factor_integrator = FactorModelIntegrator(self.factor_model)
+        return self._factor_integrator
+    
+    @property
+    def risk_attributor(self):
+        """Lazy initialization of risk attributor."""
+        if self._risk_attributor is None:
+            from signals.risk_attribution import RiskAttributor
+            self._risk_attributor = RiskAttributor()
+        return self._risk_attributor
+    
+    def estimate_signal_covariance_with_factors(
+        self,
+        signal_portfolios: Dict[str, pd.Series],
+        factor_loadings: pd.DataFrame,
+        factor_covariance: np.ndarray
+    ) -> pd.DataFrame:
+        """
+        Estimate signal covariance using factor model.
+        
+        Σ_signals = B_signals' @ Σ_factors @ B_signals
+        
+        Where B_signals is the matrix of signal factor loadings.
+        
+        Args:
+            signal_portfolios: Dict mapping signal name -> stock weights
+            factor_loadings: Stock-level factor loadings (stocks x factors)
+            factor_covariance: Factor covariance matrix
+            
+        Returns:
+            Signal covariance matrix
+        """
+        # Estimate signal factor loadings
+        signal_loadings = self.factor_integrator.estimate_signal_factor_loadings(
+            signal_portfolios,
+            factor_loadings
+        )
+        
+        # Estimate signal covariance from factor model
+        signal_cov = self.factor_integrator.estimate_signal_covariance_from_factors(
+            signal_loadings,
+            factor_covariance
+        )
+        
+        # Convert to DataFrame
+        signals = list(signal_portfolios.keys())
+        signal_cov_df = pd.DataFrame(signal_cov, index=signals, columns=signals)
+        
+        logger.info(f"Estimated signal covariance using factor model")
+        logger.info(f"  Signal factor loadings shape: {signal_loadings.shape}")
+        
+        return signal_cov_df
+    
+    def optimize_with_factor_model(
+        self,
+        expected_returns: pd.Series,
+        signal_portfolios: Dict[str, pd.Series],
+        factor_loadings: pd.DataFrame,
+        factor_covariance: np.ndarray,
+        idiosyncratic_variance: pd.Series,
+        previous_weights: Optional[pd.Series] = None
+    ) -> Tuple[pd.Series, Dict]:
+        """
+        Optimize signal weights using factor model for covariance.
+        
+        Args:
+            expected_returns: Expected return per signal
+            signal_portfolios: Dict mapping signal name -> stock weights
+            factor_loadings: Stock-level factor loadings
+            factor_covariance: Factor covariance matrix
+            idiosyncratic_variance: Stock-level idiosyncratic variance
+            previous_weights: Previous signal weights
+            
+        Returns:
+            Tuple of (optimal_weights, risk_report)
+        """
+        # Estimate signal covariance using factor model
+        signal_cov = self.estimate_signal_covariance_with_factors(
+            signal_portfolios,
+            factor_loadings,
+            factor_covariance
+        )
+        
+        # Optimize
+        optimal_weights = self.optimize(expected_returns, signal_cov, previous_weights)
+        
+        # Generate risk report
+        risk_report = self._generate_factor_risk_report(
+            optimal_weights,
+            signal_portfolios,
+            factor_loadings,
+            factor_covariance,
+            idiosyncratic_variance
+        )
+        
+        return optimal_weights, risk_report
+    
+    def _generate_factor_risk_report(
+        self,
+        signal_weights: pd.Series,
+        signal_portfolios: Dict[str, pd.Series],
+        factor_loadings: pd.DataFrame,
+        factor_covariance: np.ndarray,
+        idiosyncratic_variance: pd.Series
+    ) -> Dict:
+        """Generate comprehensive risk report using factor model."""
+        # Construct portfolio weights from signal weights
+        portfolio_weights = pd.Series(0.0, index=factor_loadings.index)
+        
+        for signal_name, signal_weight in signal_weights.items():
+            if signal_name in signal_portfolios:
+                stock_weights = signal_portfolios[signal_name]
+                # Normalize stock weights within signal
+                stock_weights = stock_weights / stock_weights.sum()
+                # Add to portfolio
+                for ticker, weight in stock_weights.items():
+                    if ticker in portfolio_weights.index:
+                        portfolio_weights[ticker] += signal_weight * weight
+        
+        # Generate risk report
+        risk_report = self.risk_attributor.generate_risk_report(
+            portfolio_weights,
+            factor_loadings,
+            factor_covariance,
+            idiosyncratic_variance,
+            factor_names=factor_loadings.columns.tolist()
+        )
+        
+        return risk_report
+    
+    def get_factor_exposures(
+        self,
+        signal_weights: pd.Series,
+        signal_portfolios: Dict[str, pd.Series],
+        factor_loadings: pd.DataFrame
+    ) -> pd.Series:
+        """
+        Get portfolio factor exposures given signal weights.
+        
+        Args:
+            signal_weights: Signal weights
+            signal_portfolios: Dict mapping signal name -> stock weights
+            factor_loadings: Stock-level factor loadings
+            
+        Returns:
+            Series of factor exposures
+        """
+        # Construct portfolio weights
+        portfolio_weights = pd.Series(0.0, index=factor_loadings.index)
+        
+        for signal_name, signal_weight in signal_weights.items():
+            if signal_name in signal_portfolios:
+                stock_weights = signal_portfolios[signal_name]
+                stock_weights = stock_weights / stock_weights.sum()
+                for ticker, weight in stock_weights.items():
+                    if ticker in portfolio_weights.index:
+                        portfolio_weights[ticker] += signal_weight * weight
+        
+        # Calculate factor exposures
+        common = list(set(portfolio_weights.index) & set(factor_loadings.index))
+        w = portfolio_weights.loc[common].values
+        B = factor_loadings.loc[common].values
+        
+        exposures = B.T @ w
+        
+        return pd.Series(exposures, index=factor_loadings.columns)
