@@ -10,7 +10,7 @@ data_settings:
   # Extended to 2024 for momentum factor calculation (252-day lookback)
   # Training still focuses on 2025 pure bull regime
   start_date: '2020-01-01'
-  end_date: '2026-01-01'
+  end_date: '2026-01-18'
 
 # --- Model Training Settings ---
 training_settings:
@@ -80,7 +80,7 @@ factor_settings:
   use_stable_factors_only: false  # Set to false to use all factors
   stable_factors: ['Vol_Momentum', 'Momentum', 'Leverage', 'Acceleration', 'Quality_Momentum']
 
-# --- Signal-Based Pipeline Settings (NEW) ---
+# --- Signal-Based Pipeline Settings ---
 signal_settings:
   # Signal construction
   winsorize_limits: [0.02, 0.98]    # Quantile limits for outlier treatment
@@ -125,3 +125,12 @@ signal_settings:
   regime_adjustment_strength: 0.3   # Reduced from 0.5 for smoother transitions
   regime_smooth_transitions: true   # Smooth regime transitions
   regime_transition_speed: 0.3      # Speed of transition (0-1)
+  
+  # Toraniko Factor Model Integration (Phase 3)
+  use_factor_model: true            # Enable Barra-style factor model
+  use_toraniko_signals: true        # Use Toraniko for signal construction
+  factor_cov_method: 'ledoit_wolf'  # Factor covariance method
+  factor_cov_lookback: 252          # Lookback for factor covariance
+  factor_cov_halflife: 63           # Half-life for exponential weighting
+  residualize_styles: true          # Orthogonalize styles to market+sector
+  momentum_halflife: 126            # Half-life for exponential momentum
