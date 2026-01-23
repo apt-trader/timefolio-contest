@@ -28,6 +28,7 @@ utils/__init__.py
 # Data folders
 backup/
 etc/
+test/
 db/
 logs/
 legacy
