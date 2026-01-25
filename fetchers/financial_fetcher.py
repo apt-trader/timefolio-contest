@@ -225,8 +225,15 @@ class FinancialsFetcher:
             # 1. Strip whitespace from ticker column to ensure consistency.
             df['ticker'] = df['ticker'].astype(str).str.strip()
             
-            # 2. Robustly convert 'report_date' from Unix timestamp (stored as text) to datetime.
-            df['report_date'] = pd.to_datetime(pd.to_numeric(df['report_date'], errors='coerce'), unit='s')
+            # 2. Convert 'report_date' to datetime - handle both datetime strings and Unix timestamps
+            # First try direct datetime parsing (for strings like '2020-12-31 00:00:00')
+            df['report_date'] = pd.to_datetime(df['report_date'], errors='coerce')
+            # If that fails (NaT), try Unix timestamp conversion for any remaining
+            mask = df['report_date'].isna()
+            if mask.any():
+                df.loc[mask, 'report_date'] = pd.to_datetime(
+                    pd.to_numeric(df.loc[mask, 'report_date'], errors='coerce'), unit='s'
+                )
             
             # 3. Handle None values in report_code (replace with a default value)
             df['report_code'] = df['report_code'].fillna('11013')  # Default to consolidated statement code
