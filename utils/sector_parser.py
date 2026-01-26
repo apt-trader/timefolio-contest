@@ -90,12 +90,18 @@ def parse_sector_limits_for_date(
     most_recent_date = valid_dates.max()
     latest_weights = df[df['date'] == most_recent_date].set_index('sector')['weight']
 
-    # Use sector weights directly as limits (convert from percentage to decimal)
-    sector_limits = {sector: weight / 100.0 for sector, weight in latest_weights.items()}
-
+    # Apply guideline formula: sector_limit = max(2 × market_weight, 10%)
+    # market_weight is in percentage (e.g., 15.6 for CD), convert to decimal for limit
+    sector_limits = {}
+    for sector, market_weight_pct in latest_weights.items():
+        # max(2 × market_weight, 10%) then convert to decimal
+        limit_pct = max(2 * market_weight_pct, 10.0)
+        sector_limits[sector] = limit_pct / 100.0
+    
     for sector in default_limits:
         if sector not in sector_limits:
-            sector_limits[sector] = 0.10
+            sector_limits[sector] = 0.10  # Default 10%
 
     logger.info(f"Successfully parsed limits for {len(sector_limits)} sectors.")
+    logger.debug(f"Sector limits (max(2×market, 10%)): {sector_limits}")
     return sector_limits
