@@ -34,6 +34,7 @@ from config import Config
 from data_manager import DataManager
 from signals.signal_pipeline import SignalPipeline, create_pipeline_from_config
 from compliance_filters import load_forbidden_tickers
+from utils.trade_instruction import TradeInstructionGenerator
 
 # Setup logging
 def setup_logging(log_level: str = 'INFO') -> logging.Logger:
@@ -474,6 +475,19 @@ def run_live(
         output_file = output_path / f"portfolio_{rebalance_date.strftime('%Y%m%d')}.csv"
         portfolio_df.to_csv(output_file, index=False)
         logger.info(f"Portfolio saved to {output_file}")
+        
+        # Generate trade instruction note
+        date_str = rebalance_date.strftime('%Y%m%d')
+        generator = TradeInstructionGenerator(
+            db_path=str(cfg.db_path),
+            output_dir=str(output_path)
+        )
+        instruction_path = generator.save_instructions(portfolio_df, date_str)
+        logger.info(f"Trade instructions saved to {instruction_path}")
+        
+        # Print instruction summary to console
+        instructions = generator.generate_instructions(portfolio_df, date_str)
+        print("\n" + instructions)
     
     return result
 
