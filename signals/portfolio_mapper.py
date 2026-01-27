@@ -115,11 +115,12 @@ class PortfolioMapper:
             logger.error("No composite scores calculated")
             return pd.Series()
         
-        # Step 2: Select top stocks based on composite score (with large-cap priority)
+        # Step 2: Select top stocks based on composite score (with sector and market cap constraints)
         selected_stocks = self._select_top_stocks(
             composite_scores,
             n_stocks=self.max_positions * 2,  # Select 2x for filtering
-            market_caps=market_caps
+            market_caps=market_caps,
+            sector_map=sector_map
         )
         
         if len(selected_stocks) == 0:
@@ -180,44 +181,74 @@ class PortfolioMapper:
         self,
         composite_scores: pd.Series,
         n_stocks: int,
-        market_caps: Optional[pd.Series] = None
+        market_caps: Optional[pd.Series] = None,
+        sector_map: Optional[Dict[str, str]] = None
     ) -> List[str]:
         """
-        Select top N stocks by composite score, ensuring sufficient large-cap representation.
+        Select top N stocks by composite score, respecting sector limits and large-cap requirements.
         
-        To satisfy the 30% small-cap constraint with 15% max weight per stock,
-        we need at least 5 large-cap stocks (5 × 15% = 75% > 70% required).
+        Uses a greedy selection that:
+        1. Prioritizes large-cap stocks (for 30% small-cap constraint)
+        2. Respects sector limits during selection (not just after)
+        3. Ensures diversification across sectors
         """
         sorted_scores = composite_scores.sort_values(ascending=False)
         
-        if market_caps is None:
+        if market_caps is None or sector_map is None:
             selected = sorted_scores.head(n_stocks).index.tolist()
             logger.info(f"Selected {len(selected)} candidate stocks")
             return selected
         
-        # Separate large-cap and small-cap stocks
-        large_cap_tickers = [t for t in sorted_scores.index if market_caps.get(t, 0) >= self.small_cap_threshold]
-        small_cap_tickers = [t for t in sorted_scores.index if market_caps.get(t, float('inf')) < self.small_cap_threshold]
+        # Track sector allocation during selection
+        sector_allocation = {}
+        selected = []
         
-        # Sort each group by score
-        large_cap_scores = sorted_scores.loc[[t for t in large_cap_tickers if t in sorted_scores.index]]
-        small_cap_scores = sorted_scores.loc[[t for t in small_cap_tickers if t in sorted_scores.index]]
+        # Calculate max stocks per sector based on sector limits and max weight
+        # If sector limit is 10% and max weight is 15%, we can have at most 1 stock at 10%
+        # But we want some buffer, so allow up to limit / min_weight stocks
+        min_weight = 0.05  # Assume minimum 5% weight per stock
         
-        # Calculate minimum large-cap stocks needed
-        # With 30% small-cap limit and 15% max weight, we need at least 70%/15% ≈ 5 large-cap stocks
-        min_large_cap = max(5, int((1 - self.max_small_cap_weight) / self.max_weight_per_stock) + 1)
+        for ticker in sorted_scores.index:
+            if len(selected) >= n_stocks:
+                break
+            
+            sector = sector_map.get(ticker, 'Unknown')
+            sector_limit = self.sector_limits.get(sector, self.sector_max_weight)
+            current_sector_alloc = sector_allocation.get(sector, 0)
+            
+            # Check if adding this stock would potentially exceed sector limit
+            # Allow up to sector_limit / min_weight stocks per sector
+            max_stocks_in_sector = max(1, int(sector_limit / min_weight))
+            stocks_in_sector = sum(1 for t in selected if sector_map.get(t, '') == sector)
+            
+            if stocks_in_sector >= max_stocks_in_sector:
+                continue  # Skip - sector is full
+            
+            # Check market cap constraint
+            is_small_cap = market_caps.get(ticker, 0) < self.small_cap_threshold
+            small_cap_count = sum(1 for t in selected if market_caps.get(t, 0) < self.small_cap_threshold)
+            
+            # Limit small-cap stocks to ensure we can meet 30% constraint
+            # With 15% max weight, we need at least 5 large-cap stocks for 70%
+            # So limit small-caps to n_stocks - 5
+            max_small_caps = max(2, n_stocks - 5)
+            if is_small_cap and small_cap_count >= max_small_caps:
+                continue  # Skip - too many small-caps
+            
+            selected.append(ticker)
+            sector_allocation[sector] = sector_allocation.get(sector, 0) + 1
         
-        # Select top large-cap stocks first (at least min_large_cap)
-        n_large_cap = min(max(min_large_cap, n_stocks // 2), len(large_cap_scores))
-        selected_large = large_cap_scores.head(n_large_cap).index.tolist()
+        # Log selection summary
+        large_cap_count = sum(1 for t in selected if market_caps.get(t, 0) >= self.small_cap_threshold)
+        small_cap_count = len(selected) - large_cap_count
+        logger.info(f"Selected {len(selected)} candidates: {large_cap_count} large-cap (≥1T), {small_cap_count} small-cap (<1T)")
         
-        # Fill remaining slots with small-cap stocks
-        n_small_cap = min(n_stocks - len(selected_large), len(small_cap_scores))
-        selected_small = small_cap_scores.head(n_small_cap).index.tolist()
-        
-        selected = selected_large + selected_small
-        
-        logger.info(f"Selected {len(selected)} candidates: {len(selected_large)} large-cap (≥1T), {len(selected_small)} small-cap (<1T)")
+        # Log sector distribution
+        sector_dist = {}
+        for t in selected:
+            s = sector_map.get(t, 'Unknown')
+            sector_dist[s] = sector_dist.get(s, 0) + 1
+        logger.info(f"Sector distribution: {sector_dist}")
         
         return selected
     
@@ -545,7 +576,9 @@ class PortfolioMapper:
         buffer: float = 1.0
     ) -> pd.Series:
         """
-        Apply sector weight constraints by dropping lowest-scoring stocks from over-concentrated sectors.
+        Apply sector weight constraints by scaling down over-concentrated sectors.
+        
+        Uses iterative scaling approach that preserves all stocks but adjusts weights.
         
         Args:
             buffer: Multiplier for limits (e.g., 0.99 = 99% of limit for safety margin)
@@ -557,7 +590,7 @@ class PortfolioMapper:
         })
         
         # Iteratively apply sector constraints
-        max_iterations = 10
+        max_iterations = 50  # More iterations for convergence with tight limits
         for iteration in range(max_iterations):
             # Calculate sector weights
             sector_weights = weights.groupby(stock_sectors).sum()
@@ -575,31 +608,20 @@ class PortfolioMapper:
             if iteration == 0:
                 logger.info(f"Sector constraint violations: {[(s, f'{w:.1%}>{l:.1%}') for s,(w,l) in violations.items()]}")
             
-            # For each violating sector, drop the lowest-scoring stock until within limit
+            # Scale down weights in over-concentrated sectors proportionally
             for sector, (sector_weight, limit) in violations.items():
-                sector_stocks = stock_sectors[stock_sectors == sector].index.tolist()
-                
-                # Sort by composite score (lowest first)
-                sector_scores = composite_scores.loc[sector_stocks].sort_values()
-                
-                # Drop stocks until sector weight is within limit
-                current_sector_weight = weights.loc[sector_stocks].sum()
-                for ticker in sector_scores.index:
-                    if current_sector_weight <= limit:
-                        break
-                    # Remove this stock
-                    current_sector_weight -= weights.loc[ticker]
-                    weights = weights.drop(ticker)
-                    stock_sectors = stock_sectors.drop(ticker)
+                sector_stocks = stock_sectors[stock_sectors == sector].index
+                scale_factor = limit / sector_weight
+                weights.loc[sector_stocks] *= scale_factor
             
             # Re-normalize to sum to 1
-            if len(weights) > 0:
-                weights = weights / weights.sum()
-            else:
-                break
+            weights = weights / weights.sum()
         
         if iteration == max_iterations - 1 and len(violations) > 0:
+            # Log final sector weights
+            final_sector_weights = weights.groupby(stock_sectors).sum()
             logger.warning(f"Sector constraints not fully satisfied after {max_iterations} iterations")
+            logger.warning(f"Final sector weights: {dict(final_sector_weights.round(3))}")
         
         return weights
     
