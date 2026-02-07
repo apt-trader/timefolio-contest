@@ -28,7 +28,7 @@ A **signal-based portfolio optimization system** for the Korean equity market (K
 - **Buyback Data**: Treasury stock activity integrated into Quality signal (tesstkAcqsDspsSttus API)
 - **Management Confidence**: Net buyback signals management's belief in undervaluation
 
-### Toraniko Factor Model Integration (NEW)
+### Toraniko Factor Model Integration 
 - **Barra-Style Risk Model**: WLS regression for factor return estimation
 - **Factor Covariance**: Ledoit-Wolf shrinkage on factor returns
 - **Risk Attribution**: Systematic vs idiosyncratic risk decomposition
@@ -50,7 +50,7 @@ A **signal-based portfolio optimization system** for the Korean equity market (K
 - **Market Cap Filter**: Min 100B KRW (시가총액 1,000억원 이상)
 - **Liquidity Filter**: Min 3B KRW 5-day avg trading value (5일 평균 거래대금 30억원 이상)
 
-### Signal Quality Monitoring (IC Monitor)
+### Signal Quality Monitoring 
 - **Information Coefficient**: Tracks IC = cor(signal/σ, forward_return/σ) for each signal
 - **Rolling IC History**: 26-week rolling average for trend detection
 - **Alert System**: Warns when IC drops below threshold (default: 0.02)
@@ -154,28 +154,6 @@ python main_signal.py --mode backtest --start 2024-01-01 --end 2024-12-31
 ---
 
 ## Configuration
-
-### Date Ranges in `config.yaml`
-
-There are **two separate date ranges** with different purposes:
-
-```yaml
-data_settings:
-  start_date: '2020-01-01'   # Data loading range (need 2+ years for warmup)
-  end_date: '2025-12-31'     # Latest available data
-
-training_settings:           # LEGACY - only used by old main.py
-  start_date: '2025-01-01'   # Not used by main_signal.py
-  end_date: '2026-01-01'
-```
-
-| Setting | Purpose | Used By |
-|---------|---------|---------|
-| `data_settings.start_date` | How far back to load data (momentum needs 252 days, warmup needs 52 weeks) | `main_signal.py` |
-| `data_settings.end_date` | Latest data to load | `main_signal.py` |
-| `training_settings.*` | Legacy model training period | Old `main.py` only |
-
-**Rule**: Set `data_settings.start_date` to at least 2 years before your backtest start date.
 
 ### Signal Pipeline Settings
 
@@ -322,17 +300,6 @@ Where:
 |-------|--------------|-------------|------------|--------|-------|
 | Phase 1 (Signal MVO) | +5.16% | +11.02% | 9.82% | **1.12** | N/A |
 | Phase 2 (+ Costs & Regime) | +5.07% | +10.84% | 9.95% | **1.09** | 149.5 bps |
-
-### Comparison with Old System
-
-| Aspect | Old System | New System |
-|--------|-----------|------------|
-| Optimization level | Stock (200+) | Signal (5) |
-| Covariance matrix | 200x200 (unstable) | 5x5 (stable) |
-| SNR | ~0.05 | ~0.5-1.0 |
-| Model complexity | ML ensemble | Simple MVO |
-| Interpretability | Low | High |
-| Turnover | Uncontrolled | Managed |
 
 ---
 
