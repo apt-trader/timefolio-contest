@@ -17,6 +17,7 @@ fredapi>=0.5.2
 pandas-market-calendars>=4.3.2
 OpenDartReader>=0.2.3
 selenium>=4.39.0
+webdriver-manager>=4.0.0  # Auto-manages ChromeDriver version to match Chrome
 
 # Database
 sqlalchemy>=2.0.23
