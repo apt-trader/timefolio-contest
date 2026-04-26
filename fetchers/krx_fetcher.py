@@ -136,25 +136,60 @@ class KRXDataFetcher:
         return False
     
     def _verify_authentication(self) -> bool:
-        """Verify if current session is authenticated."""
+        """Verify if current session is authenticated for both website and API."""
         try:
-            # Try to access the main data page
+            # Check main website access
             response = self.session.get(
                 "https://data.krx.co.kr/contents/MDC/MAIN/main/index.cmd", 
                 timeout=10,
                 allow_redirects=False
             )
-            # If we're not redirected to login, we're authenticated
-            if response.status_code == 200 and 'login' not in response.url.lower():
-                self._authenticated = True
-                logger.info("Session is authenticated")
-                return True
-            else:
-                logger.info("Session not authenticated - need to login")
+            if response.status_code != 200 or 'login' in response.url.lower():
+                logger.info("Main website session not authenticated")
                 return False
+            
+            # IMPORTANT: Test API access with a RECENT date (yesterday or 2 days ago)
+            # Using old dates might pass even with expired tokens due to caching
+            logger.info("Verifying API access with test OTP request...")
+            from datetime import datetime, timedelta
+            test_date = (datetime.now() - timedelta(days=2)).strftime('%Y%m%d')
+            
+            test_otp = self._get_otp_without_retry("dbms/MDC/STAT/standard/MDCSTAT01501", 
+                                                   mktId="STK", trdDd=test_date, share="1", money="1")
+            
+            if not test_otp or test_otp.strip().startswith('<html'):
+                logger.info(f"API access not authenticated - OTP generation failed for {test_date}")
+                return False
+            
+            self._authenticated = True
+            logger.info("Session is authenticated for both website and API")
+            return True
         except Exception as e:
             logger.error(f"Authentication verification failed: {e}")
             return False
+    
+    def _get_otp_without_retry(self, bld: str, **kwargs) -> Optional[str]:
+        """Get OTP without retry logic - for verification only."""
+        try:
+            payload = {
+                "bld": bld,
+                "csvxls_isNo": "false",
+                "name": "fileDown",
+                "url": bld
+            }
+            payload.update(kwargs)
+            response = self.session.post(GEN_OTP_URL, data=payload, timeout=10)
+            
+            # Check for 403 or HTML error pages
+            if response.status_code == 403:
+                logger.debug("OTP request returned 403 - API access expired")
+                return None
+            if response.status_code == 200 and not response.text.strip().startswith('<html'):
+                return response.text.strip()
+            return None
+        except Exception as e:
+            logger.debug(f"OTP verification request failed: {e}")
+            return None
     
     def _login_with_kakao(self) -> bool:
         """Login using KakaoTalk OAuth via Selenium."""
@@ -179,8 +214,18 @@ class KRXDataFetcher:
             chrome_options.add_argument('--disable-gpu')
             chrome_options.add_argument(f'user-agent={DEFAULT_HEADERS["User-Agent"]}')
             
-            # Initialize driver
-            driver = webdriver.Chrome(options=chrome_options)
+            # Initialize driver with automatic version management
+            try:
+                from selenium.webdriver.chrome.service import Service
+                from webdriver_manager.chrome import ChromeDriverManager
+                driver = webdriver.Chrome(
+                    service=Service(ChromeDriverManager().install()),
+                    options=chrome_options
+                )
+            except ImportError:
+                # Fallback to system ChromeDriver if webdriver-manager not installed
+                logger.warning("webdriver-manager not installed, using system ChromeDriver. Install with: pip install webdriver-manager")
+                driver = webdriver.Chrome(options=chrome_options)
             driver.set_page_load_timeout(30)
             
             # Navigate to KRX login page
